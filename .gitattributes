@@ -1,0 +1,3 @@
+# Never convert line endings: the pinned upstream sources must stay byte-identical on every
+# machine (their checksums are verified), and every text file here uses LF.
+* -text
