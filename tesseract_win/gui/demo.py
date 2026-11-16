@@ -275,7 +275,7 @@ class DemoRunner(threading.Thread):
         self.clock = clock or VirtualClock(self.script.speed)
         self.requests: List[Any] = []
         self._lock = threading.Lock()
-        self._stop: Optional[StopMode] = None
+        self._stop_mode: Optional[StopMode] = None
         self._current = ""
         self._current_started = 0.0
         self._last_working = 0.0
@@ -284,18 +284,18 @@ class DemoRunner(threading.Thread):
     def request_stop(self, mode: StopMode) -> None:
         with self._lock:
             self.requests.append(mode)
-            if self._stop is not StopMode.NOW:
-                self._stop = mode
+            if self._stop_mode is not StopMode.NOW:
+                self._stop_mode = mode
 
     def cancel_stop(self) -> None:
         with self._lock:
             self.requests.append("cancel")
-            if self._stop is StopMode.AFTER_CURRENT:
-                self._stop = None
+            if self._stop_mode is StopMode.AFTER_CURRENT:
+                self._stop_mode = None
 
     def stop_pending(self) -> Optional[StopMode]:
         with self._lock:
-            return self._stop
+            return self._stop_mode
 
     def current(self) -> Tuple[str, float]:
         with self._lock:
