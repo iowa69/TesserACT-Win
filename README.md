@@ -52,7 +52,7 @@ is needed. The folder can live anywhere, including a USB stick.
 
 ## Four steps
 
-*The screenshots use made-up sample names.*
+*Screenshots taken on Windows by the automated build, with made-up sample names.*
 
 ### 1. Samples
 
