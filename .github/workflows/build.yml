@@ -43,9 +43,34 @@ env:
 
 jobs:
   # -------------------------------------------------------------------------------------
+  corpus:
+    name: Reads for the Linux/Windows comparison
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Synthetic read sets
+        run: python engines/equivalence.py make-corpus build/corpus
+      - name: Real isolate
+        if: env.REAL_ISOLATE == '1'
+        run: python engines/equivalence.py fetch-real build/corpus
+      # The same read files are used on both systems, so the comparison cannot be blurred by
+      # two machines generating them separately.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comparison-reads
+          retention-days: 3
+          compression-level: 0
+          path: build/corpus
+
+  # -------------------------------------------------------------------------------------
   linux:
     name: Linux reference
     runs-on: ubuntu-24.04
+    needs: corpus
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -76,12 +101,10 @@ jobs:
       - name: Program tests
         run: xvfb-run -a python -m pytest -q -m "not parity"
 
-      - name: Reads for the Linux/Windows comparison
-        run: python engines/equivalence.py make-corpus build/corpus
-
-      - name: Real isolate for the comparison
-        if: env.REAL_ISOLATE == '1'
-        run: python engines/equivalence.py fetch-real build/corpus
+      - uses: actions/download-artifact@v4
+        with:
+          name: comparison-reads
+          path: build/corpus
 
       - name: What the Linux engines produce
         run: python engines/equivalence.py run build/corpus --engines build/engines/linux --out build/equivalence-linux.json
@@ -95,20 +118,11 @@ jobs:
             build/selftest-linux.txt
             build/engines/linux/BUILD_INFO.json
 
-      # The same read files are used on Windows, so the comparison cannot be blurred by
-      # two machines generating them separately.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: comparison-reads
-          retention-days: 3
-          compression-level: 0
-          path: build/corpus
-
   # -------------------------------------------------------------------------------------
   windows:
     name: Windows build, proof and package
     runs-on: windows-2022
-    needs: linux
+    needs: corpus
     timeout-minutes: 120
     defaults:
       run:
@@ -140,25 +154,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: linux-reference
-          path: build/linux-reference
-
-      - uses: actions/download-artifact@v4
-        with:
           name: comparison-reads
           path: build/corpus
 
-      - name: Self-tests agree with Linux
-        run: python engines/selftest.py compare build/linux-reference/selftest-linux.txt build/selftest-windows.txt
-
-      - name: The engines' own test suites, on Windows
-        shell: msys2 {0}
-        run: bash engines/ci/run_upstream_suites.sh windows
-
-      - name: Same output as Linux, byte for byte
-        run: |
-          python engines/equivalence.py run build/corpus --engines build/engines/windows --out build/equivalence-windows.json
-          python engines/equivalence.py compare build/linux-reference/equivalence-linux.json build/equivalence-windows.json
+      - name: What the Windows engines produce
+        run: python engines/equivalence.py run build/corpus --engines build/engines/windows --out build/equivalence-windows.json
 
       - name: Program tests
         run: |
@@ -192,6 +192,10 @@ jobs:
         continue-on-error: true
         run: python tools/ci_screenshots.py --out build/shots-windows
 
+      - name: The engines' own test suites, on Windows
+        shell: msys2 {0}
+        run: bash engines/ci/run_upstream_suites.sh windows
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -213,10 +217,31 @@ jobs:
           path: release/*
 
   # -------------------------------------------------------------------------------------
+  compare:
+    name: Same output on Windows as on Linux, byte for byte
+    runs-on: ubuntu-24.04
+    needs: [linux, windows]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-reference
+          path: build/linux-reference
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-proof
+          path: build/windows-proof
+      - name: Self-tests agree
+        run: python3 engines/selftest.py compare build/linux-reference/selftest-linux.txt build/windows-proof/selftest-windows.txt
+      - name: Engine output is identical
+        run: python3 engines/equivalence.py compare build/linux-reference/equivalence-linux.json build/windows-proof/equivalence-windows.json
+
+  # -------------------------------------------------------------------------------------
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows
+    needs: [windows, compare]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
