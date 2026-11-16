@@ -1,0 +1,2513 @@
+#include <map>
+#include <set>
+#include "assembler.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <ctime>
+#include <thread>
+#include <cstring>
+#include <unordered_map>
+#include <utility>
+
+#include "carry_gate.h"
+#include "correct.h"
+#include "deep_norm.h"
+#include "dev_fork_batch.h"
+#include "emit_fixflags.h"
+#include "emit_post.h"
+#include "dropout_bridge.h"
+#include "counter.h"
+#include "envflags.h"
+#include "gapfill.h"
+#include "gap_evidence.h"
+#include "mappolish.h"
+#include "om2_clonal.h"
+#include "om2_close.h"
+#include "om2_output.h"
+#include "organism_join.h"
+#include "om2_ledger.h"
+#include "p2_emit.h"
+#include "p2_emitb.h"
+#include "pairends.h"
+#include "replicon.h"
+#include "gfa.h"
+#include "graph_fix_flags.h"
+#include "polish.h"
+#include "resolve.h"
+#include "read_coverage.h"
+#include "util.h"
+#include "version.h"
+
+namespace ts {
+
+
+
+const char* runModeName(RunMode m) {
+    switch (m) {
+        case RunMode::Fast:       return "fast";
+        case RunMode::Standard:   return "standard";
+        case RunMode::Careful:    return "careful";
+        case RunMode::Aggressive: return "aggressive";
+    }
+    return "standard";
+}
+
+bool parseRunMode(const std::string& s, RunMode& out) {
+    if (s == "fast")       { out = RunMode::Fast; return true; }
+    if (s == "standard")   { out = RunMode::Standard; return true; }
+    if (s == "careful")    { out = RunMode::Careful; return true; }
+    if (s == "aggressive") { out = RunMode::Aggressive; return true; }
+    return false;
+}
+
+void AssemblyOptions::applyMode() {
+    switch (mode) {
+        case RunMode::Fast:
+            if (!userSetRounds) simplifyRounds = 6;
+            if (!userSetMinLink) minLinkSupport = 3;
+            if (!userSetTie) tieRatio = 1.3;
+            if (!userSetPolishPasses) polishPasses = 0;
+            break;
+        case RunMode::Standard:
+            break;
+        case RunMode::Careful:
+            // More simplification passes and stricter joins: fewer but better
+            // supported decisions, at the cost of some contiguity.
+            if (!userSetRounds) simplifyRounds = 24;
+            if (!userSetMinLink) minLinkSupport = 3;
+            if (!userSetLinkPerX) linkSupportPerX = 0.14;
+            if (!userSetTie) tieRatio = 1.4;
+            if (!userSetPolishPasses) polishPasses = 2;
+            break;
+        case RunMode::Aggressive:
+            // Collapse diverged repeat copies and accept narrower wins: maximum
+            // contiguity, with a real risk of a misassembly.
+            if (!userSetBubble) bubbleCoverageLimit = 10.0;
+            if (!userSetTie) tieRatio = 1.05;
+            if (!userSetMinLink) minLinkSupport = 2;
+            if (!userSetLinkPerX) linkSupportPerX = 0.05;
+            if (!userSetRounds) simplifyRounds = 16;
+            break;
+    }
+    if (polishPasses <= 0) polish = false;
+}
+
+Assembler::Assembler(AssemblyOptions opt) : opt_(std::move(opt)) {
+    if (opt_.threads <= 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        opt_.threads = hc ? static_cast<int>(hc) : 4;
+    }
+    opt_.applyMode();
+    if (opt_.maxMemoryBytes <= 0) {
+        // Leave headroom for the graph and the read store, which live alongside
+        // the counting tables.
+        const long long total = util::totalMemoryBytes();
+        opt_.maxMemoryBytes = total > 0 ? static_cast<long long>(total * 0.8) : 0;
+    }
+}
+
+// Drop rungs off the TOP of the ladder whose k-mer coverage will be too thin to assemble.
+//
+// k-mer coverage falls as depth*(L-k+1)/L, so the last rung is always the thinnest, and on
+// a 2x151 library at k=95 it retains only 37% of read depth. A 21x library therefore
+// reaches the top rung with about 8x k-mer coverage -- against which an abundance cutoff of
+// 2 and an error rate of ~0.1% per base leave a graph made largely of noise. The contigs
+// this assembler reports come from the final rung, so a shredded final rung is reported
+// directly as shredded contigs.
+//
+// SPAdes stops at k=77 for 151 bp reads. That is not timidity: it is the same arithmetic,
+// applied with a fixed read-length rule because SPAdes has no depth estimate available when
+// it picks its ladder. Having one lets the decision key off the quantity that actually
+// governs the outcome rather than a proxy for it -- a thin 2x250 library should stop early
+// and a deep 2x150 library should be allowed to climb, and read length alone cannot tell
+// those apart.
+//
+// The floor is not baked in yet: TESSERACT_QC_MIN_KCOV defaults to 0, which disables this
+// entirely and reproduces the previous ladder exactly. That default is deliberate -- it
+// keeps the pre-QC behaviour available as a baseline while the value is swept.
+std::vector<int> Assembler::trimLadderToCoverage(std::vector<int> ladder) const {
+    const double kMinKmerCov = env::real("TESSERACT_QC_MIN_KCOV", 0.0);
+    const size_t kMinRungs = static_cast<size_t>(env::integer("TESSERACT_QC_MIN_RUNGS", 3));
+    if (kMinKmerCov <= 0 || !qc_.loaded || ladder.size() <= kMinRungs) return ladder;
+
+    size_t keep = ladder.size();
+    while (keep > kMinRungs && qc_.expectedKmerCoverage(ladder[keep - 1]) < kMinKmerCov) --keep;
+    if (keep == ladder.size()) return ladder;
+
+    if (opt_.verbose) {
+        std::fprintf(stderr,
+                     "      QC: dropping %zu top rung(s) -- k=%d would carry only %.1fx "
+                     "k-mer coverage at %.1fx read depth (floor %.1f)\n",
+                     ladder.size() - keep, ladder.back(),
+                     qc_.expectedKmerCoverage(ladder.back()), qc_.readDepth, kMinKmerCov);
+    }
+    ladder.resize(keep);
+    return ladder;
+}
+
+std::vector<int> Assembler::resolveKLadder() const {
+    // An explicit -k is the user's decision and is never second-guessed, not even by a
+    // measurement that disagrees with it.
+    if (!opt_.kValues.empty()) return opt_.kValues;
+    return trimLadderToCoverage(baseKLadder());
+}
+
+uint64_t Assembler::kmerMassAt(int k) const {
+    uint64_t mass = 0;
+    const size_t n = reads_.size();
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t len = reads_.length(i);
+        if (len >= static_cast<uint32_t>(k)) mass += len - static_cast<uint32_t>(k) + 1;
+    }
+    return mass;
+}
+
+size_t Assembler::rescueLadderContigs(const std::vector<std::string>& reserve,
+                                      std::vector<std::string>& seqs,
+                                      std::vector<double>& covs) const {
+    // Contigs are emitted from the final graph alone, so the highest rung decides what
+    // survives. Sequence a smaller k resolved and a larger k could not rebuild -- because
+    // fewer reads reach across k bases, or because simplification cut it -- simply leaves
+    // the assembly.
+    //
+    // A raw union of every rung is not the answer: measured on one panel isolate it gains
+    // 0.48 pp of genome fraction and takes the duplication ratio to 2.99, because almost
+    // everything is emitted three times. What is wanted is only the difference. So keep
+    // each rung's contigs, and at the end append just those the final assembly does not
+    // already contain.
+    //
+    // Containment is tested on 31-mers rather than by alignment: a reserve contig whose
+    // k-mers are mostly present is already represented, however it is broken up among the
+    // final contigs, and one whose k-mers are mostly absent is sequence that was lost.
+    if (reserve.empty() || seqs.empty()) return 0;
+    constexpr int kProbe = 31;
+
+    KmerTable present;
+    size_t bases = 0;
+    for (const std::string& s : seqs) bases += s.size();
+    present.reserve(bases * 2);
+    for (const std::string& s : seqs) {
+        Kmer fwd = 0, rc = 0;
+        int valid = 0;
+        for (size_t p = 0; p < s.size(); ++p) {
+            const int c = baseCode(s[p]);
+            if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+            fwd = pushBack(fwd, c, kProbe);
+            rc = pushFrontRc(rc, c, kProbe);
+            if (++valid >= kProbe) present.put(fwd < rc ? fwd : rc, 1);
+        }
+    }
+
+    // Longest first: a short contig that is contained in a longer one must be tested
+    // against the longer one, which means the longer one has to be emitted first.
+    std::vector<const std::string*> order;
+    order.reserve(reserve.size());
+    for (const std::string& s : reserve) order.push_back(&s);
+    std::sort(order.begin(), order.end(),
+              [](const std::string* a, const std::string* b) { return a->size() > b->size(); });
+
+    size_t added = 0;
+    for (const std::string* sp : order) {
+        const std::string& s = *sp;
+        if (s.size() < opt_.ladderUnionMinLen) continue;
+        size_t total = 0, hit = 0;
+        Kmer fwd = 0, rc = 0;
+        int valid = 0;
+        for (size_t p = 0; p < s.size(); ++p) {
+            const int c = baseCode(s[p]);
+            if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+            fwd = pushBack(fwd, c, kProbe);
+            rc = pushFrontRc(rc, c, kProbe);
+            if (++valid < kProbe) continue;
+            ++total;
+            if (present.contains(fwd < rc ? fwd : rc)) ++hit;
+        }
+        if (total == 0) continue;
+        const double frac = static_cast<double>(hit) / static_cast<double>(total);
+        if (frac >= opt_.ladderUnionMaxPresent) continue;   // already represented
+        seqs.push_back(s);
+        covs.push_back(0.0);
+        ++added;
+        // Register what was just added, or the next reserve contig is tested against an
+        // assembly that no longer reflects what has been emitted. Adjacent rungs resolve
+        // overlapping sequence, so without this two near-copies of the same locus both
+        // pass the containment test and both get written -- which is how a union earns the
+        // duplication ratios the literature reports for concatenated assemblies (7.3 on
+        // MetaHipMer's twelve-way coassembly, against 1.00 on this panel today).
+        {
+            Kmer f2 = 0, r2 = 0;
+            int v2 = 0;
+            for (size_t q = 0; q < s.size(); ++q) {
+                const int c2 = baseCode(s[q]);
+                if (c2 < 0) { v2 = 0; f2 = 0; r2 = 0; continue; }
+                f2 = pushBack(f2, c2, kProbe);
+                r2 = pushFrontRc(r2, c2, kProbe);
+                if (++v2 >= kProbe) present.put(f2 < r2 ? f2 : r2, 1);
+            }
+        }
+    }
+    return added;
+}
+
+// Paired-read nomination for gap closing.
+//
+// SPAdes will not bridge two dead ends on sequence alone. Every join must also be
+// nominated by at least two read pairs falling within max_dist_to_tip of the two ends
+// (gap_closer.cpp:74-118 builds the tip neighbourhood, :54-72 casts the votes, :389
+// applies weight_threshold 2.0). The sequence test and the paired test are statistically
+// independent, and that conjunction is what makes the operation safe -- measured here,
+// sequence alone on a raw graph bridged 37,685 pairs against a ceiling of 804.
+//
+// Returns the set of oriented end-pairs with at least `minVotes` supporting pairs, keyed
+// as (min(a,b), max(a,b)) where an oriented end is (unitig << 1) | end.
+//
+// Declared in gap_evidence.h (external linkage since build_v3, so it can be tested).
+//
+// T08 (build_v3, TESSERACT_FIX_GAP_NOMINATOR=1, default off). The legacy walk below has
+// three faults, each of which makes nomination depend on how a unitig happens to be
+// STORED rather than on the graph: (1) it reuses the tip's end `1 - e` for every node,
+// so after a link that flips stored orientation it leaves the predecessor through its
+// tip-facing end, into sibling branches; (2) it tests non-branching on the predecessor's
+// far end instead of its tip-facing end l.toEnd; (3) its k-mer index is strand-blind and
+// first-writer-wins in unordered_map order, so a node in two tips' neighbourhoods (an
+// isolated unitig with both ends dead) credits one of them arbitrarily. With the fix the
+// stack carries the oriented id (node << 1) | tip-facing end, the non-branching test is on
+// l.toEnd (as in SPAdes' OutTipMap and nominateOrientedGapJoins), and a read hit selects
+// the tip its strand points to; a k-mer placed at two node/strand positions is ambiguous.
+// With the flag unset the legacy statements run unchanged.
+std::set<std::pair<uint64_t, uint64_t>> nominateGapJoins(const UnitigGraph& g,
+                                                         const SequenceStore& reads,
+                                                         size_t maxDistToTip, int probeK,
+                                                         uint32_t minVotes, size_t* votedOut,
+                                                         GapNominatorStats* statsOut) {
+    const int nomFix = fixflags::fixLevel("TESSERACT_FIX_GAP_NOMINATOR");
+    GapNominatorStats localStats;
+    GapNominatorStats& ns = statsOut ? *statsOut : localStats;
+    ns = GapNominatorStats();
+    ns.fix = nomFix;
+    if (env::on("TESSERACT_GAP_ORIENTED", false)) {
+        ns.oriented = 1;
+        return nominateOrientedGapJoins(g, reads, maxDistToTip, probeK, minVotes, votedOut);
+    }
+    std::set<std::pair<uint64_t, uint64_t>> out;
+    if (votedOut) *votedOut = 0;
+    if (!reads.paired()) return out;
+
+    const size_t n = g.nodes.size();
+    const size_t ov = static_cast<size_t>(g.k() - 1);
+
+    // Walk back from every dead end along non-branching paths, so a read sitting upstream
+    // of a dead end still votes for it. This is SPAdes' OutTipMap.
+    std::unordered_map<uint64_t, uint64_t> tipOf;
+    for (uint32_t u = 0; u < n; ++u) {
+        if (g.nodes[u].deleted) continue;
+        for (int e = 0; e < 2; ++e) {
+            if (!g.nodes[u].ends[e].empty()) continue;
+            const uint64_t tip = (static_cast<uint64_t>(u) << 1) | static_cast<uint64_t>(e);
+            ++ns.tips;
+            // Oriented id (node << 1) | tip-facing end; the legacy path uses only the node.
+            std::vector<std::pair<uint64_t, size_t>> stack{{tip, 0}};
+            tipOf[tip] = tip;
+            while (!stack.empty()) {
+                const uint64_t curO = stack.back().first;
+                const uint32_t cur = static_cast<uint32_t>(curO >> 1);
+                const size_t dist = stack.back().second;
+                stack.pop_back();
+                const int back = nomFix ? 1 - static_cast<int>(curO & 1) : 1 - e;
+                if (dist > maxDistToTip) continue;
+                for (const Link& l : g.nodes[cur].ends[back]) {
+                    if (g.nodes[l.to].deleted) continue;
+                    // only follow a path that does not branch on the way to the tip
+                    const int testEnd = nomFix ? static_cast<int>(l.toEnd)
+                                               : 1 - static_cast<int>(l.toEnd);
+                    if (g.nodes[l.to].ends[testEnd].size() != 1) continue;
+                    const uint64_t oid =
+                        (static_cast<uint64_t>(l.to) << 1) | static_cast<uint64_t>(l.toEnd);
+                    if (!tipOf.emplace(oid, tip).second) continue;
+                    const size_t add = g.nodes[l.to].seq.size() > ov
+                                           ? g.nodes[l.to].seq.size() - ov : 0;
+                    stack.push_back({oid, dist + add});
+                }
+            }
+        }
+    }
+    ns.walked = tipOf.size();
+    if (tipOf.size() < 2) return out;
+
+    // A k-mer index over the tip neighbourhood only. A read that lands anywhere else is
+    // invisible, which is how SPAdes restricts attention without a filtering pass.
+    std::unordered_map<Kmer, uint64_t, KmerHasher> idx;
+    // Fix: the value is a placement (node << 1) | canonical-is-reverse, indexed over the
+    // neighbourhood nodes in node order; a k-mer seen at two placements is ambiguous.
+    constexpr uint64_t kAmbiguous = UINT64_MAX - 1;
+    if (nomFix) {
+        std::vector<uint32_t> nodesSorted;
+        nodesSorted.reserve(tipOf.size());
+        for (const auto& kv : tipOf) nodesSorted.push_back(static_cast<uint32_t>(kv.first >> 1));
+        std::sort(nodesSorted.begin(), nodesSorted.end());
+        nodesSorted.erase(std::unique(nodesSorted.begin(), nodesSorted.end()), nodesSorted.end());
+        for (uint32_t u : nodesSorted) {
+            const std::string& seq = g.nodes[u].seq;
+            if (static_cast<int>(seq.size()) < probeK) continue;
+            Kmer fwd = 0, rc = 0;
+            int valid = 0;
+            for (size_t p = 0; p < seq.size(); ++p) {
+                const int c = baseCode(seq[p]);
+                if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+                fwd = pushBack(fwd, c, probeK);
+                rc = pushFrontRc(rc, c, probeK);
+                if (++valid < probeK || fwd == rc) continue;
+                const uint64_t val = (static_cast<uint64_t>(u) << 1) | (rc < fwd ? 1u : 0u);
+                auto ins = idx.emplace(fwd < rc ? fwd : rc, val);
+                if (!ins.second && ins.first->second != val && ins.first->second != kAmbiguous) {
+                    ins.first->second = kAmbiguous;
+                    ++ns.ambiguousKmers;
+                }
+            }
+        }
+    } else
+    for (const auto& kv : tipOf) {
+        const uint32_t u = static_cast<uint32_t>(kv.first >> 1);
+        const std::string& seq = g.nodes[u].seq;
+        if (static_cast<int>(seq.size()) < probeK) continue;
+        Kmer fwd = 0, rc = 0;
+        int valid = 0;
+        for (size_t p = 0; p < seq.size(); ++p) {
+            const int c = baseCode(seq[p]);
+            if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+            fwd = pushBack(fwd, c, probeK);
+            rc = pushFrontRc(rc, c, probeK);
+            if (++valid < probeK) continue;
+            idx.emplace(fwd < rc ? fwd : rc, kv.second);   // first writer wins
+        }
+    }
+    ns.indexedKmers = idx.size();
+    if (idx.empty()) return out;
+
+    size_t strandRejects = 0;
+    auto tipForRead = [&](size_t r) -> uint64_t {
+        const uint32_t len = reads.length(r);
+        if (static_cast<int>(len) < probeK) return UINT64_MAX;
+        Kmer fwd = 0, rc = 0;
+        int valid = 0;
+        for (uint32_t p = 0; p < len; ++p) {
+            const int c = reads.baseAt(r, p);
+            if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+            fwd = pushBack(fwd, c, probeK);
+            rc = pushFrontRc(rc, c, probeK);
+            if (++valid < probeK) continue;
+            auto it = idx.find(fwd < rc ? fwd : rc);
+            if (it == idx.end()) continue;
+            if (!nomFix) return it->second;
+            if (it->second == kAmbiguous) continue;
+            // The read runs toward the node's 3' end when it agrees with the stored strand;
+            // it may vote only for a tip that end faces.
+            const uint32_t node = static_cast<uint32_t>(it->second >> 1);
+            const bool readReverse = ((rc < fwd) ? 1u : 0u) != (it->second & 1);
+            auto t = tipOf.find((static_cast<uint64_t>(node) << 1) | (readReverse ? 0u : 1u));
+            if (t == tipOf.end()) { ++strandRejects; return UINT64_MAX; }
+            return t->second;
+        }
+        return UINT64_MAX;
+    };
+
+    std::map<std::pair<uint64_t, uint64_t>, uint32_t> votes;
+    const size_t pairs = reads.pairCount();
+    for (size_t p = 0; p < pairs; ++p) {
+        const uint64_t a = tipForRead(p * 2);
+        if (a == UINT64_MAX) continue;
+        const uint64_t b = tipForRead(p * 2 + 1);
+        if (b == UINT64_MAX || b == a) continue;
+        if ((a >> 1) == (b >> 1)) continue;            // same unitig
+        ++votes[{std::min(a, b), std::max(a, b)}];
+    }
+    for (const auto& kv : votes) {
+        if (kv.second >= minVotes) out.insert(kv.first);
+    }
+    if (votedOut) *votedOut = votes.size();
+    ns.strandRejects = strandRejects;
+    return out;
+}
+
+namespace {
+
+// Trim the redundant copy of a repeat carried at the end of two different contigs.
+//
+// Measured over 185 *S. aureus* isolates: 53% of our QUAST duplication excess is contig
+// ends overlapping each other on the reference, and we carry 3.8x more of it than SPAdes
+// over an almost identical number of overlapping pairs (2,598 vs 2,642) -- our overlaps
+// are individually far longer. 70% of SPAdes' duplicated bases sit in a single overlap of
+// exactly its final K, the unavoidable de Bruijn overhang. 90.6% of ours sit in overlaps
+// LONGER than 2k, 90% of them terminal on both contigs, at >=99% identity, with lengths
+// that recur to the base pair across unrelated isolates at canonical *S. aureus* IS
+// element sizes (1324 = IS256, ~1512 = IS1181, 790 = IS431).
+//
+// So the sequence written twice is a mobile element that both flanking contigs carry to
+// their ends. SPAdes avoids it by stopping at the repeat boundary -- which is also why it
+// is the less contiguous assembler, so that is not the trade to copy. Keeping the
+// extension and dropping the second copy of the overlap keeps the contiguity and removes
+// the duplication.
+//
+// Only EXACT dovetails longer than `minOverlap` are trimmed, and only from the shorter
+// partner, so the longer contig is never shortened and no sequence disappears from the
+// assembly -- it remains, once, on the contig better placed to carry it.
+// Dovetail and findTerminalDovetails() live in emit_post.cpp (G-emit), unchanged, beside the
+// trim that consumes them, so the trim can be driven by tests.
+
+}  // namespace
+
+std::vector<int> Assembler::baseKLadder() const {
+
+    // Mean, not maximum. Many public runs arrive already trimmed by the
+    // submitter, so their reads are variable-length: one 301 bp survivor in a
+    // library whose reads average 190 would otherwise pick a ladder most of
+    // the reads are too short to contribute a single k-mer to. The mean is
+    // what determines how much k-mer each read still carries at the top rung.
+    const int rl = reads_.size() ? static_cast<int>(reads_.totalBases() / reads_.size())
+                                 : static_cast<int>(reads_.maxReadLength());
+
+    // Each rung must stay comfortably below the read length, or too few k-mers
+    // per read survive to keep the graph connected.
+    if (opt_.mode == RunMode::Fast) {
+        if (rl >= 200) return {21, 55, 99};
+        if (rl >= 140) return {21, 55, 77};
+        if (rl >= 100) return {21, 45, 55};
+        if (rl >= 70)  return {21, 45};
+        return {15, 21};
+    }
+    if (opt_.mode == RunMode::Careful) {
+        if (rl >= 200) return {21, 33, 45, 55, 67, 77, 87, 99, 111, 127};
+        if (rl >= 165) return {21, 33, 45, 55, 67, 77, 87, 99, 111};
+        if (rl >= 140) return {21, 33, 45, 55, 67, 77, 87, 95};
+        if (rl >= 100) return {21, 31, 41, 51, 61, 71};
+        if (rl >= 70)  return {17, 25, 33, 41, 49};
+        return {15, 21, 27};
+    }
+    // 2x250 libraries carry far more k-mer per read than 2x150, so the top
+    // rung climbs with the read length rather than stopping at 95. The rung
+    // count stays at five: on the closed-reference panel, raising the top from
+    // 95 to 127 took unitig N50 from 142,604 to 207,162 and mismatches from
+    // 2.78 to 0.52 per 100 kbp, while a sixth rung only bought runtime.
+    // 127 is the top of what four 64-bit words hold and the most separating
+    // rung available: every repeat shorter than it collapses at every smaller
+    // k. It needs enough read left over to contribute k-mers, which 165 bp
+    // gives -- measured on the closed-reference panel, moving this rung from
+    // 115 to 127 left contiguity unchanged and improved both genome fraction
+    // (98.945 -> 98.988) and per-base accuracy (0.08 -> 0.06 mismatches per
+    // 100 kbp).
+    // The 165+ ladder steps 77 -> 127, a jump of 50. Every other step in every other
+    // ladder here is between 12 and 22, and the 140-164 ladder steps 77 -> 95. That gap is
+    // not a free choice: each rung exists to resolve the repeats the previous one could
+    // not, and to hand the next rung a graph built from sequence it has already trusted.
+    // Across a 50-k gap the carried contigs have to bridge every repeat between 77 and 127
+    // unaided, at a rung where k-mer coverage has dropped by another third.
+    //
+    // Measured over 491 strains with closed references, split by the top rung their read
+    // length selects:
+    //
+    //     top rung   n     median SPAdes/vanilla NGA50 ratio
+    //     95        24     0.78   (TesserACT ahead)
+    //     127      458     1.07   (TesserACT behind)
+    //
+    // SPAdes, on the same 2x250 libraries, uses {21,33,55,77,99,127} -- it does climb to
+    // 127, but it gets there through 99. The rung count is what differs, not the ceiling.
+    //
+    // TESSERACT_DENSE_LADDER selects how finely the top of the ladder is sampled:
+    //
+    //     0   {21,33,55,77,127}                  the original five rungs
+    //     1   {21,33,55,77,99,127}               matches what SPAdes uses here (default)
+    //     2   {21,33,55,77,99,111,119,127}       four rungs above 77
+    //     3   {21,33,55,77,87,99,111,119,127}    also halves the 77->99 step (default)
+    //
+    // Level 3 is the default, on a full-cohort measurement. A 50-strain comparison had
+    // said the extra rungs did nothing (NGA50 5 better / 6 worse, p=0.79) and that reading
+    // was wrong -- 40 of those 50 strains tied, so the comparison rested on about ten
+    // informative pairs. Repeated over 666 strains, level 3 beats level 1:
+    //
+    //     NGA50            97 better /  49 worse   p=0.0008
+    //     contigs         241 better / 145 worse   p=3e-7
+    //     genome fraction 277 better / 178 worse   p=7e-8
+    //     misassemblies, mismatches, duplication   no significant difference
+    //
+    // The cost is real but small: nine count-and-simplify passes instead of six. Measured
+    // alone on a quiet machine the denser ladder is actually FASTER (0.92x), because each
+    // rung inherits a better-consolidated carry-over and therefore builds a smaller graph;
+    // under contention that advantage disappears and it runs somewhat slower. Either way
+    // the difference is well inside what the contiguity gain is worth.
+    const int kLadderLevel = static_cast<int>(env::integer("TESSERACT_DENSE_LADDER", 3));
+    if (rl >= 165) {
+        if (kLadderLevel >= 3) return {21, 33, 55, 77, 87, 99, 111, 119, 127};
+        if (kLadderLevel >= 2) return {21, 33, 55, 77, 99, 111, 119, 127};
+        if (kLadderLevel >= 1) return {21, 33, 55, 77, 99, 127};
+        return {21, 33, 55, 77, 127};
+    }
+    // Below 165 the mean used to select a shorter ladder outright -- {21,33,55,77,95} at
+    // 140-164 and {21,33,45,55} at 100-139. That is the wrong statistic, and measurably so.
+    //
+    // A library whose reads have been trimmed by the submitter is bimodal: a mass of short
+    // reads and a long tail at the instrument's full cycle count. Its mean lands low while
+    // a tenth of its reads are still 300 bp. Measured on four panel libraries, as the
+    // fraction of the k=21 k-mer mass that survives to k=127:
+    //
+    //     isolate           mean  p50  p90   k=95  k=127   old top rung
+    //     GCF010364725v2    151   130  300    50%    35%    55
+    //     GCF046268025v1    164   146  301    55%    41%    95
+    //     GCF045347525v1    201   187  351    62%    49%    127
+    //     GCF026547035v1    141   151  151    40%    17%    95
+    //
+    // The binning is anti-correlated with what it is protecting. The library that keeps the
+    // MOST k-mer mass at k=127 (35%) was capped at k=55, while the fixed-length 151 bp
+    // library that keeps the LEAST (17%) was given a rung at 95. SPAdes runs 21,33,55,77,
+    // 99,127 on all four regardless, and beats us on the three that were truncated.
+    //
+    // So take the top rung from the read-length distribution rather than one moment of it:
+    // start from the full ladder and drop rungs that would not retain enough k-mer mass to
+    // build a graph from. The floor is set where the 151 bp control keeps exactly the top
+    // rung it had before, so a fixed-length library sees no change and only the bimodal
+    // ones gain.
+    // Restores the pre-fix mean-binned ladder, so a factorial experiment can hold this
+    // variable while changing others.
+    const bool kLegacyLadder = env::on("TESSERACT_LEGACY_LADDER", false);
+    if (kLegacyLadder) {
+        if (rl >= 140) return {21, 33, 55, 77, 95};
+        if (rl >= 100) return {21, 33, 45, 55};
+        if (rl >= 70)  return {21, 33, 45};
+        if (rl >= 45)  return {17, 25, 31};
+        return {15, 21};
+    }
+    if (rl >= 100) {
+        const double kMinMass = env::real("TESSERACT_MIN_KMER_MASS", 0.35);
+        std::vector<int> ladder = {21, 33, 55, 77, 87, 99, 111, 119, 127};
+        if (kLadderLevel == 2) ladder = {21, 33, 55, 77, 99, 111, 119, 127};
+        else if (kLadderLevel == 1) ladder = {21, 33, 55, 77, 99, 127};
+        else if (kLadderLevel <= 0) ladder = {21, 33, 55, 77, 127};
+        const uint64_t base = kmerMassAt(ladder.front());
+        if (base == 0 || kMinMass <= 0) return ladder;
+        size_t keep = ladder.size();
+        while (keep > 3 &&
+               static_cast<double>(kmerMassAt(ladder[keep - 1])) / static_cast<double>(base) <
+                   kMinMass) {
+            --keep;
+        }
+        ladder.resize(keep);
+        return ladder;
+    }
+    if (rl >= 70)  return {21, 33, 45};
+    if (rl >= 45)  return {17, 25, 31};
+    return {15, 21};
+}
+
+bool Assembler::iterate(int k, const std::vector<std::string>& carryOver, UnitigGraph& graph,
+                        double& meanCoverage, KIteration& it, std::string& error,
+                        double prevPeak) {
+    util::Timer t;
+    it.k = k;
+    it.carryOverContigs = carryOver.size();
+
+    KmerCounter counter(k, opt_.threads);
+    counter.setMemoryLimit(opt_.maxMemoryBytes);
+    // Contigs from the previous, smaller k are trusted sequence: weighting them
+    // keeps them above the abundance cutoff without letting them dominate the
+    // histogram that cutoff is chosen from.
+    //
+    // The weight has to scale with coverage. k-mer coverage falls as
+    // depth*(L-k+1)/L, so the top of the ladder is always the thinnest rung; on a
+    // shallow library it is thin enough that the carried contigs land near the
+    // abundance cutoff chosen from the same histogram, get dropped, and the
+    // contiguity they existed to preserve is lost with them. A weight of 4 is a
+    // nudge at 50x and useless at 13x.
+    //
+    // Measured over 666 Klebsiella isolates with closed references: below ~25x
+    // peak coverage a weight of 32 improved NGA50 on 4/4 strains (+4% to +782%,
+    // median +337%), and at 179x it was neutral. But at 39.9x it HALVED NGA50
+    // (886,314 -> 429,730), so this must be gated, not applied blanket -- a
+    // uniform change would buy a 22% minority's gain with the majority's loss.
+    //
+    // The gate must key off a number the boost cannot contaminate. Using the
+    // PREVIOUS k's observed peak is self-defeating: raising the weight inflates
+    // that peak (23.0 at k=55 -> 47.0 at k=77 on ERR6293532), which switches the
+    // gate back off at the next rung -- exactly where coverage is thinnest.
+    //
+    // So project from the FIRST rung, which is counted with no carry-over at all
+    // and therefore reflects the library alone:
+    //
+    //     peak(k) ~ peak(k0) * (L - k + 1) / (L - k0 + 1)
+    //
+    // Checked on ERR6293532 (L=251, peak(21)=25.0): predicts 13.5 at k=127
+    // against 13.35 observed.
+    const uint32_t kCarryWeight = static_cast<uint32_t>(env::integer("TESSERACT_CARRY_WEIGHT", 4));
+    // Threshold on the PROJECTED peak at the final rung. Calibrated against the two
+    // strains that bracket the decision:
+    //
+    //   ERR11578724  peak(k=21)=47  -> projects 25.4 at k=127; boosting gives +337%
+    //   ERR5056274   peak(k=21)=61  -> projects ~33   at k=127; boosting COSTS -51%
+    //
+    // 30 sits between them with margin either side. NOTE: this is calibrated on a
+    // handful of strains and wants confirming on a held-out set before it is trusted
+    // as a universal default -- the separation is clear but the sample is small.
+    // Retuned against 77 changed assemblies from a full-corpus run. Summed NGA50 delta
+    // by candidate threshold:  20 -> +60k, 24 -> +194k, 25 -> +265k, 28 -> +39k,
+    // 30 -> -120k. The previous value of 30 was net NEGATIVE -- harm concentrated in the
+    // 25-30 band (3 better / 8 worse) while the win sits at 20-25 (11/6). The whole
+    // 20-28 band is positive, so 25 is a broad optimum, not a knife-edge fit.
+    //
+    // Magnitude in perspective: +265k summed over 45 boosted strains is a refinement.
+    // The substantive fix nearby is the peak-detection repair in counter.cpp, worth
+    // +202k on a single strain.
+    const double kCarryBoostBelow = env::real("TESSERACT_CARRY_BOOST_BELOW", 25.0);
+    // DISABLED (set equal to the ordinary weight). Everything above describes how this
+    // boost was calibrated and why it looked like a win; it does not survive being
+    // measured against the metric that matters.
+    //
+    // The first evidence against it was a unit test: "spanned repeat resolved to one
+    // contig" began failing at the commit that introduced this, returning 17,231 bp of
+    // sequence for a 16,600 bp construct, in two contigs instead of one. That is the boost
+    // over-weighting carried contigs until they collapse into each other.
+    //
+    // Confirmed on 50 closed-reference strains. Turning it off, against the same build
+    // with it on: NGA50 10 better / 1 worse, misassemblies 7 better / 1 worse, and no
+    // measurable cost anywhere -- mismatches 6/5, duplication 5/4, both indistinguishable
+    // from noise. A change that improves contiguity AND misassemblies at once is not a
+    // trade being made well; it is a defect being removed.
+    //
+    // Kept as an environment knob rather than deleted, because the coverage-projection
+    // machinery it sits on is sound and worth keeping available: set
+    // TESSERACT_CARRY_WEIGHT_LOW=32 to restore the previous behaviour exactly.
+    const uint32_t kCarryWeightLow = static_cast<uint32_t>(env::integer("TESSERACT_CARRY_WEIGHT_LOW", 4));
+    // Decide ONCE, from the LAST rung, and apply the decision to every rung.
+    //
+    // Projecting per-rung is too timid: on a library whose final peak is 24, the
+    // early rungs project well above the threshold, so the boost fires only at the
+    // last k -- far too late to build the contiguity the later rungs inherit. That
+    // is measurable: ERR11578724 scored 8,989 with a per-rung gate against 40,819
+    // with the weight applied throughout. What matters is whether the assembly will
+    // END thin, because the final rung is where the reported contigs come from.
+    //
+    // When a QC report is available the projection is unnecessary: it measures read depth
+    // directly, from a spectrum built at a small k where the coverage mode is unambiguous,
+    // with the error mass already separated out. The chain above starts from THIS
+    // assembler's peak estimate at the first rung -- the same estimate that was silently
+    // landing on the error shoulder until recently, and that the carry boost itself
+    // perturbs. Reading depth from outside the loop removes both problems at once.
+    const bool kQcCarry = env::on("TESSERACT_QC_CARRY", false);
+    double projected = prevPeak;
+    if (kQcCarry && qc_.loaded && finalK_ > 0 && qc_.expectedKmerCoverage(finalK_) > 0) {
+        projected = qc_.expectedKmerCoverage(finalK_);
+    } else if (basePeak_ > 0 && baseK_ > 0 && finalK_ > 0) {
+        const double L = static_cast<double>(reads_.maxReadLength());
+        const double num = L - static_cast<double>(finalK_) + 1.0;
+        const double den = L - static_cast<double>(baseK_) + 1.0;
+        if (num > 0 && den > 0) projected = basePeak_ * num / den;
+    }
+    const bool thin = projected > 0 && projected < kCarryBoostBelow;
+    const uint32_t chosenWeight = thin ? kCarryWeightLow : kCarryWeight;
+    const uint32_t carryWeight = carryOver.empty() ? 0 : chosenWeight;
+    if (opt_.verbose && carryWeight && thin) {
+        std::fprintf(stderr,
+                     "  k=%-3d carry weight raised to %u "
+                     "(projected peak at final k=%d is %.1f < %.1f)\n",
+                     k, carryWeight, finalK_, projected, kCarryBoostBelow);
+    }
+    // Reads only. The carry-over is added after the cutoff is chosen, not before it --
+    // see addTrusted() in counter.h for why the two have to be kept apart. Set
+    // TESSERACT_CARRY_WEIGHTED=1 to restore the old behaviour, where carried contigs were
+    // counted alongside the reads at `carryWeight` and had to clear the cutoff they had
+    // just helped to move.
+    // Weighted carry stays the default: the trusted path was measured at 4 better / 11
+    // worse on NGA50 and 10/22 on genome fraction. SPAdes can insert previous-K contigs
+    // unconditionally because it fills coverage from a separate read stream; here the
+    // count IS the coverage, so a k-mer admitted at the cutoff reads as error-level to
+    // every rule downstream and is pruned. TESSERACT_TRUSTED_CARRY=1 selects it anyway.
+    const bool kCarryWeighted = !env::on("TESSERACT_TRUSTED_CARRY", false);
+    if (kCarryWeighted) {
+        counter.count(reads_, carryOver, carryWeight);
+    } else {
+        counter.count(reads_, {}, 0);
+    }
+
+    if (counter.exceededMemory()) {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+                      "ran out of the memory budget (%.1f GB) while counting %d-mers. "
+                      "Raise it with --max-memory, raise the abundance cutoff with -c, "
+                      "drop the largest k with -k, or use --mode fast",
+                      static_cast<double>(opt_.maxMemoryBytes) / 1073741824.0, k);
+        error = buf;
+        return false;
+    }
+
+    KmerTable solid;
+    counter.extractSolid(opt_.forcedCutoff, solid);
+    const CountingStats& cs = counter.stats();
+    // T01 (build_v3): a junction the previous rung formed across a short word shared by two
+    // loci has no read support at this k and is solid only through the carry weight. Mode 0
+    // (flag unset) is a dry run that changes nothing; see carry_gate.h. The counter line is
+    // printed on every rung, zeros included.
+    {
+        const int gateMode = fixflags::fixLevel("TESSERACT_FIX_CARRY_READ_GATE", 2);
+        CarryGateStats gs;
+        if (kCarryWeighted && carryWeight > 0 && !carryOver.empty()) {
+            gs = gateCarryOnlyJunctions(carryOver, solid, k, carryWeight, cs.cutoff, gateMode);
+        }
+        if (opt_.verbose) {
+            std::fprintf(stderr,
+                         "  k=%-3d [carrygate] enabled=%d mode=%d carriedKmers=%zu readAbsent=%zu "
+                         "runs=%zu runsTooLong=%zu runsNoCompetitor=%zu candidates=%zu "
+                         "runsGated=%zu kmersWithheld=%zu\n",
+                         k, gateMode > 0 ? 1 : 0, gateMode, gs.carriedKmers, gs.readAbsent,
+                         gs.runs, gs.runsTooLong, gs.runsNoCompetitor, gs.candidates,
+                         gs.runsGated, gs.kmersWithheld);
+        }
+    }
+    // Trusted carry-over, after the cutoff has been fixed by the reads alone. A k-mer the
+    // reads already vouched for keeps its measured depth; one they never produced enters at
+    // the cutoff, present but claiming no more depth than the bar it was excused from.
+    if (!kCarryWeighted && !carryOver.empty()) {
+        const uint32_t floorCount = std::max<uint32_t>(1, cs.cutoff);
+        it.carryOverRescued = counter.addTrusted(carryOver, solid, floorCount);
+        if (opt_.verbose && it.carryOverRescued) {
+            std::fprintf(stderr,
+                         "  k=%-3d carry  %s k-mers from %zu carried contigs entered below "
+                         "the cutoff of %u\n",
+                         k, util::commify(static_cast<long long>(it.carryOverRescued)).c_str(),
+                         carryOver.size(), cs.cutoff);
+        }
+    }
+    it.countSeconds = t.elapsed();
+    it.totalKmers = cs.totalKmers;
+    it.distinctKmers = cs.distinctKmers;
+    it.solidKmers = cs.solidKmers;
+    it.cutoff = cs.cutoff;
+    it.peakCoverage = cs.peakCoverage;
+    // The histogram tail is mostly empty; keep enough to show the error
+    // shoulder and the coverage peak.
+    const size_t histCap = std::min<size_t>(cs.histogram.size(),
+                                            static_cast<size_t>(cs.peakCoverage * 4) + 50);
+    it.countHistogram.assign(cs.histogram.begin(),
+                             cs.histogram.begin() + static_cast<long>(histCap));
+
+    if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d count %.1fs  distinct=%s solid=%s cutoff=%u peak=%.1f\n",
+                     k, it.countSeconds,
+                     util::commify(static_cast<long long>(cs.distinctKmers)).c_str(),
+                     util::commify(static_cast<long long>(cs.solidKmers)).c_str(),
+                     cs.cutoff, cs.peakCoverage);
+    }
+    if (solid.size() == 0) {
+        error = "no solid k-mers at k=" + std::to_string(k) +
+                "; coverage may be too low or the cutoff too aggressive";
+        return false;
+    }
+
+    t.reset();
+    graph = UnitigGraph::build(solid, k, opt_.threads);
+    graph.compact();
+    it.graphSeconds = t.elapsed();
+    it.unitigsBuilt = graph.liveCount();
+    it.lengthBuilt = graph.totalLength();
+    it.n50Built = graph.n50();
+    if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d graph %.1fs  ", k, it.graphSeconds);
+        graph.stats("built", true);
+    }
+    // Dead ends BEFORE any cleaning. The per-round counter only reports what the graph
+    // looks like after simplify() has already run, so a rising count there cannot be told
+    // apart from a graph that was fragmented in the first place. Deleting an INTERIOR
+    // unitig creates two dead ends, and removeLocallyWeak/removeErroneousConnections have
+    // no dead-end guard -- only filterByReadDepth does. This baseline is what says whether
+    // the breaks are in the data or in our own cleaning.
+    it.deadEndsBuilt = graph.totalDeadEnds();
+    if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d deadends before cleaning: %zu\n", k, it.deadEndsBuilt);
+    }
+
+    meanCoverage = cs.peakCoverage > 0 ? cs.peakCoverage : graph.medianCoverage();
+    // First rung is counted without carry-over, so its peak is the honest library
+    // coverage and the only safe basis for projecting the thinner rungs.
+    if (basePeak_ <= 0 && carryOver.empty() && cs.peakCoverage > 0) {
+        basePeak_ = cs.peakCoverage;
+        baseK_ = k;
+    }
+    t.reset();
+    graph.simplify(meanCoverage, static_cast<int>(reads_.maxReadLength()), opt_.verbose,
+                   opt_.bubbleCoverageLimit, opt_.simplifyRounds, &it.rounds,
+                   cs.errorThreshold);
+    it.simplifySeconds = t.elapsed();
+
+    // Gap closing, as its own stage after simplification -- SPAdes' late_gapcloser
+    // (pipeline.cpp:175). It runs on the CLEAN graph: tips, bubbles and erroneous
+    // connections are gone, so the dead ends that survive are genuine coverage holes.
+    //
+    // Two independent tests must both pass. The sequence test asks for an exact overlap of
+    // [minIntersection, k-2] bases -- the missing bases are already carried in the two
+    // flanks' terminal overhangs, so nothing is invented. The paired test asks two read
+    // pairs to vouch for that specific pair of ends. Neither alone is sufficient: measured
+    // here, sequence alone on a raw graph bridged 37,685 pairs against a ceiling of 804.
+    const size_t kGapCloseMinInt = static_cast<size_t>(env::integer("TESSERACT_GAPCLOSE", 0));
+    const uint32_t kGapCloseVotes = static_cast<uint32_t>(env::integer("TESSERACT_GAPCLOSE_VOTES", 2));
+    const bool gapSequenceCompetition = env::on("TESSERACT_GAP_SEQUENCE_COMPETITION", false);
+    // T15 (build_v3): the gap closer reports on EVERY rung once it is configured, zeros
+    // included, and says so when it is off -- a rung with nothing to close used to print
+    // nothing, which a log from a binary without the feature cannot be told apart from.
+    // The legacy "gap close:" line keeps its format (its second number is every end-pair
+    // with at least one vote); [gapclose] adds the pairs that actually met the vote floor.
+    // stderr only.
+    if (kGapCloseMinInt > 0) {
+        util::Timer gt;
+        size_t voted = 0, tested = 0, closed = 0, nominated = 0;
+        GapNominatorStats nomStats;
+        nomStats.fix = fixflags::fixLevel("TESSERACT_FIX_GAP_NOMINATOR");
+        if (kGapCloseVotes > 0) {
+            const std::set<std::pair<uint64_t, uint64_t>> nom =
+                nominateGapJoins(graph, reads_, 5000, 31, kGapCloseVotes, &voted, &nomStats);
+            nominated = nom.size();
+            closed = graph.closeGapsByOverlap(kGapCloseMinInt, &nom, &tested, gapSequenceCompetition);
+        } else {
+            closed = graph.closeGapsByOverlap(kGapCloseMinInt, nullptr, &tested, gapSequenceCompetition);
+        }
+        if (closed) graph.compact();
+        it.gapsClosed = closed;
+        if (opt_.verbose) {
+            std::fprintf(stderr,
+                         "  k=%-3d gap close: %zu bridged from %zu nominated end-pairs "
+                         "(%zu overlaps tested), %.1fs\n",
+                         k, closed, voted, tested, gt.elapsed());
+            const bool orientedOn = env::on("TESSERACT_GAP_ORIENTED", false);
+            std::fprintf(stderr,
+                         "  k=%-3d [gapclose] minInt=%zu votes=%u oriented=%d competition=%d "
+                         "nominatorFix=%d voted=%zu nominated=%zu tested=%zu bridged=%zu "
+                         "tips=%zu walked=%zu ambiguousKmers=%zu strandRejects=%zu\n",
+                         k, kGapCloseMinInt, kGapCloseVotes, orientedOn ? 1 : 0,
+                         gapSequenceCompetition ? 1 : 0, nomStats.fix, voted, nominated, tested,
+                         closed, nomStats.tips, nomStats.walked, nomStats.ambiguousKmers,
+                         nomStats.strandRejects);
+        }
+    } else if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d [gapclose] off nominatorFix=%d\n", k,
+                     fixflags::fixLevel("TESSERACT_FIX_GAP_NOMINATOR"));
+    }
+    // T28 (build_v3): hairpin links kept or dropped by compaction on this rung's graph.
+    if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d [hairpin_keep] enabled=%d kept=%zu dropped=%zu\n", k,
+                     graph.keepHairpins() ? 1 : 0, graph.hairpinsKept(), graph.hairpinsDropped());
+    }
+    it.unitigsFinal = graph.liveCount();
+    it.lengthFinal = graph.totalLength();
+    it.n50Final = graph.n50();
+    it.medianCoverage = graph.medianCoverage();
+    if (opt_.verbose) {
+        std::fprintf(stderr, "  k=%-3d simplify %.1fs  ", k, it.simplifySeconds);
+        graph.stats("simplified", true);
+    }
+    return true;
+}
+
+bool Assembler::run(std::string& error) {
+    util::Timer total;
+    report_.version = ts::kVersion;
+    report_.mode = runModeName(opt_.mode);
+    report_.threads = opt_.threads;
+    {
+        std::time_t tt = std::time(nullptr);
+        std::tm tmv{};
+        localtime_r(&tt, &tmv);
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
+        report_.startedAt = buf;
+    }
+    for (const Library& l : opt_.libraries) {
+        if (!l.r1.empty()) report_.inputFiles.push_back(l.r1);
+        if (!l.r2.empty()) report_.inputFiles.push_back(l.r2);
+    }
+    // G-emit fix switches: a malformed value would otherwise run as a silent null arm.
+    if (!emitfix::validate(error)) return false;
+    emitfix::logSummary();
+
+    // Phase 2 emit-B (p2_emitb.h; every flag default off). The provenance hashes run on a
+    // background thread from here, so hashing the read files overlaps the assembly. Under the
+    // developer fork batch they run at the end instead (no thread may be alive across fork()).
+    p2::EmitBState p2state;
+    p2state.opt = p2::EmitBOptions::fromEnv();
+    p2::ProvenanceInput p2provIn;
+    p2::ProvenanceJob p2prov;
+    if (p2state.opt.provenance) {
+        for (size_t li = 0; li < opt_.libraries.size(); ++li) {
+            const Library& l = opt_.libraries[li];
+            const bool pairLib = !l.r2.empty() || l.interleaved;
+            if (!l.r1.empty()) p2provIn.inputs.push_back({l.interleaved ? "--12" : (pairLib ? "-1" : "-s"), l.r1});
+            if (!l.r2.empty()) p2provIn.inputs.push_back({"-2", l.r2});
+        }
+        p2provIn.namedFiles = {{"model", opt_.organismModelPath}, {"--qc", opt_.qcPath},
+                               {"--is-panel", opt_.isPanelPath}, {"--is-sites", opt_.isSitesPath}};
+        p2provIn.defaultsLine = defaults::line(opt_.tieRatio);
+        p2provIn.mode = runModeName(opt_.mode);
+        if (!env::isSet("TESSERACT_DEV_FORK_BATCH")) p2prov.start(p2provIn);
+    }
+
+    // Check the output directory is usable before spending the run on it. This
+    // is checked here rather than at the final stage, so a run that cannot
+    // write its output fails before it spends the time to produce one.
+    if (!util::makeDirs(opt_.outDir)) {
+        error = "cannot create output directory " + opt_.outDir;
+        return false;
+    }
+    // The model, panel and site table are not consulted until stage 4b, by which
+    // point a real isolate has cost several minutes of read loading, correction
+    // and de Bruijn iteration. A path that cannot be opened is knowable now.
+    if (opt_.organismModelPath.empty() &&
+        (!opt_.isPanelPath.empty() || !opt_.isSitesPath.empty())) {
+        error = "--is-panel and --is-sites are only consulted while joining with a model; "
+                "add --model FILE, or drop them";
+        return false;
+    }
+    const std::pair<const char*, const std::string*> namedInputs[] = {
+        {"--model", &opt_.organismModelPath},
+        {"--is-panel", &opt_.isPanelPath},
+        {"--is-sites", &opt_.isSitesPath},
+    };
+    for (const auto& named : namedInputs) {
+        if (named.second->empty()) continue;
+        std::FILE* probe = std::fopen(named.second->c_str(), "rb");
+        if (!probe) {
+            error = std::string("cannot open ") + named.first + " file: " + *named.second;
+            return false;
+        }
+        std::fclose(probe);
+    }
+    {
+        const std::string probe = opt_.outDir + "/.tesseract_write_test";
+        std::FILE* f = std::fopen(probe.c_str(), "w");
+        if (!f) {
+            error = "output directory is not writable: " + opt_.outDir;
+            return false;
+        }
+        std::fclose(f);
+        std::remove(probe.c_str());
+    }
+
+    // Check the model is a model before touching a single read. The full load happens after
+    // the k-mer ladder, so that its hundreds of megabytes are not resident through the
+    // memory-heaviest stage -- but that also means an unusable model went undiagnosed until
+    // read loading, error correction and the whole ladder had already run. On a clinical
+    // isolate that is minutes spent to be told the file was a truncated download.
+    if (!opt_.organismModelPath.empty()) {
+        std::string mErr;
+        if (!OrganismModel::checkHeader(opt_.organismModelPath, mErr)) {
+            error = mErr;
+            return false;
+        }
+    }
+
+    dev::ForkBatch diagnosticBatch;
+    if (!diagnosticBatch.prepare(opt_, error)) return false;
+
+    if (opt_.verbose) std::fprintf(stderr, "[1/7] loading reads\n");
+    reads_.setQualityTrim(opt_.qtrim);
+    if (!reads_.load(opt_.libraries, opt_.threads, error)) return false;
+    if (reads_.size() == 0) { error = "no reads were loaded"; return false; }
+    report_.reads = reads_.size();
+    report_.inputBases = reads_.totalBases();
+    report_.maxReadLength = reads_.maxReadLength();
+    report_.paired = reads_.paired();
+    report_.qualityTrimmedBases = reads_.trimmedBases();
+    // T27: which reads held a non-ACGT base in the input. Taken now, before correction masks
+    // anything, because afterwards an ambiguity bit no longer says where it came from. Only
+    // built when TESSERACT_FIX_GAPFILL_SKIP_INPUT_N is on.
+    std::vector<uint8_t> inputAmbiguousReads;
+    if (emitfix::enabled(emitfix::kGapfillSkipInputN)) {
+        inputAmbiguousReads = readsWithInputAmbiguity(reads_, opt_.threads);
+    }
+    if (opt_.verbose) {
+        std::fprintf(stderr, "      %s reads, %s bases, max length %u%s  [mode: %s]\n",
+                     util::commify(static_cast<long long>(reads_.size())).c_str(),
+                     util::commify(static_cast<long long>(reads_.totalBases())).c_str(),
+                     reads_.maxReadLength(), reads_.paired() ? ", paired" : "",
+                     runModeName(opt_.mode));
+        if (reads_.trimmedBases() > 0) {
+            const double pct = 100.0 * static_cast<double>(reads_.trimmedBases()) /
+                               static_cast<double>(reads_.trimmedBases() + reads_.totalBases());
+            std::fprintf(stderr, "      quality trimmed %s bases from 3' ends (%.1f%%, below Q%d)\n",
+                         util::commify(static_cast<long long>(reads_.trimmedBases())).c_str(),
+                         pct, opt_.qtrim.meanQuality);
+        }
+    }
+
+    // Load the QC report before the ladder is chosen -- choosing the ladder is one of the
+    // decisions it informs, and after resolveKLadder() returns it is already too late.
+    //
+    // A named-but-unusable report is a hard error, not a warning. The whole point of
+    // passing one is that the run behaves differently because of it; silently falling back
+    // to the self-derived estimates would produce a run that looks QC-guided, is not, and
+    // is indistinguishable in its output from one that is.
+    if (!opt_.qcPath.empty()) {
+        std::string qcError;
+        if (!loadLibraryQC(opt_.qcPath, qc_, qcError)) { error = qcError; return false; }
+        if (opt_.verbose) {
+            std::fprintf(stderr,
+                         "      QC: depth %.1fx, genome %.2f Mb, error rate %.4f%%, "
+                         "insert %.0f bp%s\n",
+                         qc_.readDepth, qc_.genomeSize / 1e6, qc_.errorRate * 100.0,
+                         qc_.insertPeak, qc_.spectrumReliable ? "" : "  [spectrum flagged unreliable]");
+        }
+    }
+
+    const std::vector<int> ladder = resolveKLadder();
+    stats_.kUsed = ladder;
+
+    if (opt_.correctReads && !ladder.empty()) {
+        // Correcting against the smallest k: short k-mers stay above the
+        // abundance cutoff even in thin coverage, so the trusted set covers the
+        // genome densely enough to anchor almost every read.
+        const int kc = ladder.front();
+        if (opt_.verbose) {
+            std::fprintf(stderr, "[2/7] read error correction (k=%d, trust cutoff %s, "
+                         "graph cutoff %s)\n", kc,
+                         opt_.trustCutoff ? std::to_string(opt_.trustCutoff).c_str() : "auto",
+                         opt_.forcedCutoff ? std::to_string(opt_.forcedCutoff).c_str() : "auto");
+        }
+        util::Timer t;
+        KmerCounter cc(kc, opt_.threads);
+        cc.setMemoryLimit(opt_.maxMemoryBytes);
+        cc.count(reads_, {}, 0);
+        if (cc.exceededMemory()) {
+            char message[256];
+            std::snprintf(message, sizeof(message),
+                          "ran out of the memory budget (%.3f GB) while counting %d-mers "
+                          "for read error correction; raise --max-memory or run fewer "
+                          "assemblies concurrently",
+                          static_cast<double>(opt_.maxMemoryBytes) / 1073741824.0, kc);
+            error = message;
+            return false;
+        }
+        KmerTable trusted;
+        cc.extractSolid(opt_.trustCutoff, trusted);
+        // Phase 2 (p2/plasmid): DEEP_NORM thinning of ultra-deep read pairs, off unless
+        // TESSERACT_DEEP_NORM > 0 (deep_norm.h). Unset, nothing is computed and no read is
+        // touched; the counter line is printed either way.
+        {
+            const DeepNormConfig dn = deepNormConfigFromEnv();
+            const DeepNormStats dns = deepNormApply(reads_, trusted, kc, opt_.threads,
+                                                    cc.stats().peakCoverage, dn);
+            if (dn.enabled() && opt_.verbose) {
+                // The line of the dn7 and b3b6d41 binaries, unchanged.
+                std::fprintf(stderr, "  [deep_norm] sel=%.1f target=%.1f peak=%.1f "
+                                     "candidates=%zu dropped=%zu\n",
+                             dn.sel, dn.target, dns.peak, dns.candidates(), dns.dropped());
+            }
+            deepNormPrintCounts(stderr, dn, dns);
+        }
+        // Default-off experiment: preserve pairing and rescue only retained
+        // ACGT bases independently corroborated by the overlapping mate.
+        const bool mateRescue = env::on("TESSERACT_MATE_RESCUE", false);
+        std::vector<uint32_t> maskedReadIds;
+        report_.correction = correctReads(reads_, trusted, kc, opt_.threads, opt_.minMaskRun,
+                                          mateRescue ? &maskedReadIds : nullptr);
+        if (mateRescue) {
+            const MateRescueStats rescued = rescueMateOverlaps(reads_, maskedReadIds);
+            // Report residual masking, so report.json reflects what the graph
+            // actually receives rather than the earlier correction-only mask.
+            report_.correction.basesMasked -= rescued.basesRescued;
+            if (opt_.verbose) {
+                std::fprintf(stderr,
+                             "      mate rescue: %zu bases in %zu reads, %zu overlaps "
+                             "from %zu masked pairs (%zu ambiguous)\n",
+                             rescued.basesRescued, rescued.readsRescued,
+                             rescued.overlapsAccepted, rescued.pairsExamined,
+                             rescued.ambiguousOverlaps);
+            }
+        }
+        report_.correctionSeconds = t.elapsed();
+        report_.correctionK = kc;
+        report_.correctionRun = true;
+        if (opt_.verbose) {
+            std::fprintf(stderr,
+                         "      %s bases corrected in %s reads (%s had no trusted anchor), %.1fs\n",
+                         util::commify(static_cast<long long>(report_.correction.basesCorrected)).c_str(),
+                         util::commify(static_cast<long long>(report_.correction.readsCorrected)).c_str(),
+                         util::commify(static_cast<long long>(report_.correction.readsUncorrectable)).c_str(),
+                         report_.correctionSeconds);
+            // Masking removes bases from every later stage, so it has to be
+            // visible: a run that silently drops a large share of the data
+            // would otherwise look like a clean assembly at low coverage.
+            if (report_.correction.basesMasked > 0) {
+                std::fprintf(stderr, "      %s bases masked as unvouchable (%.2f%% of input)\n",
+                             util::commify(
+                                 static_cast<long long>(report_.correction.basesMasked)).c_str(),
+                             100.0 * static_cast<double>(report_.correction.basesMasked) /
+                                 static_cast<double>(reads_.totalBases()));
+            }
+        }
+    } else {
+        // build_v3 (A2): the T30 counter correctReads() prints on every call, idle form for a
+        // run without read correction (--no-correct), so the flag's line is on every run.
+        // p2/plasmid: DEEP_NORM runs inside read correction; idle form of its counter line.
+        deepNormPrintCounts(stderr, deepNormConfigFromEnv(), DeepNormStats());
+        std::fprintf(stderr, "  [ec_cap_mask] enabled=%d capTruncatedWalks=0 capStops=0 "
+                             "basesMaskedAtCap=0\n",
+                     fixflags::fixLevel("TESSERACT_FIX_EC_CAP_MASK") > 0 ? 1 : 0);
+    }
+
+    // If no rung is shorter than the longest read, every iteration below is
+    // skipped and the run would finish "successfully" with an empty assembly.
+    // Quality trimming makes that reachable from ordinary mistakes -- a
+    // Phred+64 file read as Phred+33, or a --qtrim-quality above the data's
+    // range -- so say what happened instead of writing an empty FASTA.
+    // The minimum, not the first: -k takes its values in the order given, so
+    // testing front() rejected "-k 127,21" while accepting the same set as
+    // "-k 21,127", and called 127 the smallest k while doing it.
+    const int smallest = ladder.empty() ? 0 : *std::min_element(ladder.begin(), ladder.end());
+    if (ladder.empty() || smallest >= static_cast<int>(reads_.maxReadLength())) {
+        char buf[512];
+        if (reads_.trimmedBases() > 0) {
+            std::snprintf(buf, sizeof(buf),
+                          "after quality trimming the longest read is %u bp, shorter than the "
+                          "smallest k (%d), so there is nothing to assemble. %s bases (%.1f%%) "
+                          "were trimmed -- if that seems too many, the file may be Phred+64 "
+                          "(TesserACT assumes Phred+33) or --qtrim-quality may be set too high; "
+                          "--no-qtrim disables trimming entirely",
+                          reads_.maxReadLength(), smallest,
+                          util::commify(static_cast<long long>(reads_.trimmedBases())).c_str(),
+                          100.0 * static_cast<double>(reads_.trimmedBases()) /
+                              static_cast<double>(reads_.trimmedBases() + reads_.totalBases()));
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "the longest read is %u bp, shorter than the smallest k (%d), so there "
+                          "is nothing to assemble; lower it with -k",
+                          reads_.maxReadLength(), smallest);
+        }
+        error = buf;
+        return false;
+    }
+
+    UnitigGraph graph;
+    std::vector<std::string> carryOver;
+    std::vector<std::string> ladderReserve;
+    double meanCoverage = 0;
+
+    // The last rung shorter than the reads is where the reported contigs come from,
+    // so it is the rung whose coverage decides the carry weight for all of them.
+    finalK_ = 0;
+    for (int kk : ladder) {
+        if (kk < static_cast<int>(reads_.maxReadLength())) finalK_ = kk;
+    }
+
+    if (opt_.verbose) std::fprintf(stderr, "[3/7] de Bruijn iterations\n");
+    for (size_t i = 0; i < ladder.size(); ++i) {
+        const int k = ladder[i];
+        if (k >= static_cast<int>(reads_.maxReadLength())) {
+            if (opt_.verbose) {
+                std::fprintf(stderr, "  k=%-3d skipped (not shorter than the reads)\n", k);
+            }
+            continue;
+        }
+        KIteration it;
+        const double prevPeak = meanCoverage;   // peak from the previous, smaller k
+        if (!iterate(k, carryOver, graph, meanCoverage, it, error, prevPeak)) return false;
+        report_.iterations.push_back(std::move(it));
+
+        if (i + 1 < ladder.size()) {
+            carryOver.clear();
+            std::vector<double> covs;
+            graph.toContigs(static_cast<size_t>(ladder[i + 1]) + 1, carryOver, covs);
+            // Keep the substantial ones. Whatever the final graph fails to rebuild is
+            // recovered from here; see rescueLadderContigs().
+            if (opt_.ladderUnion) {
+                for (const std::string& c : carryOver) {
+                    if (c.size() >= opt_.ladderUnionMinLen) ladderReserve.push_back(c);
+                }
+            }
+        }
+    }
+
+    const auto batchEntry = diagnosticBatch.enter(opt_, graph, reads_, total.elapsed(), error);
+    if (batchEntry == dev::ForkBatch::Entry::Failed) return false;
+    if (batchEntry == dev::ForkBatch::Entry::ParentComplete) {
+        diagnosticBatchComplete_ = true;
+        return true;
+    }
+    if (batchEntry == dev::ForkBatch::Entry::Child) {
+        diagnosticForkChild_ = true;
+        total.reset(); // A child reports only its own post-graph elapsed time.
+    }
+
+    // Experimental measurement only: no graph admission, sequence or link edits.
+    // This is after the optional diagnostic fork so shared preprocessing remains
+    // unchanged; its audited flag may vary independently between diagnostic arms.
+    if (env::on("TESSERACT_OBSERVED_GRAPH_COVERAGE", false)) {
+        const long long resident = util::currentMemoryBytes();
+        if (resident <= 0 || opt_.maxMemoryBytes <= resident) {
+            error = "observed coverage cannot reserve additional memory within --max-memory";
+            return false;
+        }
+        ReadCoverageResult measured;
+        util::Timer measurementTime;
+        if (!measureObservedGraphCoverage(graph, reads_,
+                static_cast<size_t>(opt_.maxMemoryBytes - resident), measured, error)) return false;
+        // All allocation/counting checks have completed. This serial assignment
+        // cannot fail part-way; zero-support carried nodes remain in the graph.
+        for (size_t node = 0; node < graph.nodes.size(); ++node) {
+            if (!graph.nodes[node].deleted) graph.nodes[node].coverage = measured.nodeDepths[node];
+        }
+        const auto& s = measured.stats;
+        std::fprintf(stderr,
+            "[observed graph coverage] %zu live nodes; %llu positions / %llu distinct targets; "
+            "%llu matched / %llu valid corrected-read windows; %llu zero positions; "
+            "%zu zero-depth nodes (%zu without valid kmers); %zu allocation bytes; %.3fs\n",
+            s.liveNodes, static_cast<unsigned long long>(s.graphPositions),
+            static_cast<unsigned long long>(s.distinctTargets),
+            static_cast<unsigned long long>(s.matchedReadWindows),
+            static_cast<unsigned long long>(s.readWindows),
+            static_cast<unsigned long long>(s.zeroPositions), s.zeroDepthNodes,
+            s.noValidKmerNodes, s.allocationBytes, measurementTime.elapsed());
+    }
+
+    // TESSERACT_DROPOUT_BRIDGE (default ON since 1.4.0, src/defaults.h; =0 turns it off; combo2
+    // PKG-BRIDGE): bridge facing dead ends
+    // across read-coverage dropouts from reads that span them, once, on the final-rung
+    // simplified graph, before the resolver. See dropout_bridge.h. build_v3: both flags are
+    // strict table flags (a malformed value stops the run at startup with exit 2, instead of
+    // the package's own "disabled" line), and the counter line is printed on every run, with
+    // enabled=0 and zeros when the bridge is off (OBJECTIVE A2).
+    {
+        const uint32_t minReads =
+            static_cast<uint32_t>(env::integer("TESSERACT_DROPOUT_BRIDGE_MIN_READS", 2));
+        if (defaults::dropoutBridge()) {
+            const bool bridgeTrace = env::on("TESSERACT_JOIN_TRACE", false);
+            const DropoutBridgeStats bs = bridgeDropouts(graph, reads_, opt_.threads, minReads, bridgeTrace);
+            std::fprintf(stderr, "%s\n", formatDropoutBridgeStats(bs).c_str());
+            if (!bs.error.empty()) { error = bs.error; return false; }
+        } else {
+            DropoutBridgeStats idle;
+            idle.k = graph.k();
+            idle.minReads = minReads;
+            std::fprintf(stderr, "%s\n", formatDropoutBridgeStats(idle).c_str());
+        }
+    }
+
+    const int finalK = graph.k();
+    const size_t minLen = opt_.minContigLen ? opt_.minContigLen : static_cast<size_t>(2 * finalK);
+
+    std::vector<std::string> seqs;
+    std::vector<double> covs;
+    std::vector<GfaPath> gfaPaths;
+    // Which contigs the layout stage placed on a chromosome track. Declared out
+    // here because the classification that consumes it runs much later, after gap
+    // closing and polishing have had their turn at the sequences.
+    std::vector<char> layoutMembers;
+    // T03 (G-resolve): what each scaffold gap must look like if it is still open after gap
+    // filling; applied by restoreGapFlanks() below. Empty unless TESSERACT_FIX_GAP_FLANK.
+    std::vector<GapFlankRecord> gapFlankRecords;
+
+    if (opt_.resolveRepeats && reads_.paired()) {
+        if (opt_.verbose) std::fprintf(stderr, "[4/7] paired-end repeat resolution\n");
+        util::Timer t;
+        PairedResolver resolver(graph, reads_, opt_.threads, opt_.minLinkSupport, opt_.tieRatio,
+                                opt_.linkSupportPerX);
+        resolver.setScaffolding(opt_.scaffold);
+
+        // The resolver's repeat test is depth-only and cannot tell a multi-copy plasmid
+        // from a repeat. Only the exclusive-marker section of the model is read here --
+        // not the adjacency tables or the layout tracks -- so the full model can still be
+        // loaded after the ladder, where its size does not land on the memory peak.
+        // Failure is not fatal: without it the resolver behaves exactly as before.
+        std::unordered_map<uint64_t, uint8_t> exclusiveMarkers;
+        uint32_t markerDenom = 0;
+        if (!opt_.organismModelPath.empty()) {
+            std::string mErr;
+            if (OrganismModel::loadExclusiveMarkers(opt_.organismModelPath, exclusiveMarkers,
+                                                    markerDenom, mErr)) {
+                resolver.setExclusiveMarkers(&exclusiveMarkers, markerDenom);
+                if (opt_.verbose) {
+                    std::fprintf(stderr, "      %zu replicon-exclusive markers for the repeat test\n",
+                                 exclusiveMarkers.size());
+                }
+            } else if (opt_.verbose) {
+                std::fprintf(stderr, "      note: %s (repeat test falls back to depth alone)\n",
+                             mErr.c_str());
+            }
+        }
+
+        // OFF by default: measured, and it makes things worse.
+        //
+        // The reasoning that motivated it was sound as far as it went -- the fitted window
+        // really is mean +/- 4 sd on a heavy-tailed sample, really does work out to about
+        // [0, 859] against a mean of 262, and really does admit every candidate. Replacing
+        // it with percentiles of the QC histogram narrowed it to [49, 459].
+        //
+        // On 50 held-out difficult strains that lost, decisively: NGA50 2 better / 20 worse
+        // (p=0.001) and contig count 0 better / 45 worse (p=5e-9). Not one strain improved
+        // its contiguity.
+        //
+        // The cause is a property of how the QC histogram is built. It measures fragments
+        // by overlapping the two mates, so a fragment longer than the two reads combined
+        // contributes nothing to it -- 10.8% of pairs here are recorded as "unknown", and
+        // those are exactly the longest ones. Its 99th percentile is therefore the 99th
+        // percentile of the SHORT subpopulation, and using it as a hard ceiling discards
+        // the long-range links that span repeats, which is the whole reason to consult
+        // pairs at all. A wide window admits junk; a truncated one rejects the evidence.
+        //
+        // Kept behind the flag rather than deleted: the lower bound is measured honestly
+        // (short fragments all overlap) and may still be worth something on its own.
+        const bool kQcInsert = env::on("TESSERACT_QC_INSERT", false);
+        if (kQcInsert && qc_.loaded && qc_.insertUsable) {
+            resolver.setInsertBounds(qc_.insertP1, qc_.insertP99);
+            if (opt_.verbose) {
+                std::fprintf(stderr,
+                             "      insert window from QC: [%d, %d] bp "
+                             "(peak %.0f, %zu observations)\n",
+                             qc_.insertP1, qc_.insertP99, qc_.insertPeak,
+                             qc_.insertObservations);
+            }
+        }
+        resolver.buildSupport();
+        const ResolveStats& rs = resolver.stats();
+        if (opt_.verbose) {
+            if (rs.insert.usable) {
+                std::fprintf(stderr, "      insert size %.0f +/- %.0f from %s pairs\n",
+                             rs.insert.mean, rs.insert.stddev,
+                             util::commify(static_cast<long long>(rs.insert.observations)).c_str());
+            } else {
+                std::fprintf(stderr, "      insert size could not be estimated; "
+                                     "using graph topology only\n");
+            }
+            std::fprintf(stderr, "      %s reads anchored, %s linking pairs, %s distinct links\n",
+                         util::commify(static_cast<long long>(rs.readsMapped)).c_str(),
+                         util::commify(static_cast<long long>(rs.pairsLinking)).c_str(),
+                         util::commify(static_cast<long long>(rs.distinctLinks)).c_str());
+        }
+        resolver.resolve(seqs, covs);
+        gapFlankRecords = resolver.gapFlankRecords();
+        report_.resolve = resolver.stats();
+        report_.resolveSeconds = t.elapsed();
+        report_.resolveRun = true;
+        report_.insertHistogram = resolver.insertHistogram();
+
+        // Keep the graph walks alongside the sequences so short contigs drop
+        // out of both together.
+        const std::vector<ResolvedPath>& rp = resolver.paths();
+        std::vector<std::string> keptSeqs;
+        std::vector<double> keptCovs;
+        for (size_t j = 0; j < seqs.size(); ++j) {
+            if (seqs[j].size() < minLen) continue;
+            keptSeqs.push_back(std::move(seqs[j]));
+            keptCovs.push_back(covs[j]);
+            GfaPath gp;
+            if (j < rp.size()) {
+                gp.oriented = rp[j].oriented;
+                gp.gaps = rp[j].gaps;
+            }
+            gfaPaths.push_back(std::move(gp));
+        }
+        seqs.swap(keptSeqs);
+        covs.swap(keptCovs);
+
+        if (opt_.verbose) {
+            std::fprintf(stderr, "      %s paths, %s joins, %.1fs\n",
+                         util::commify(static_cast<long long>(report_.resolve.pathsBuilt)).c_str(),
+                         util::commify(static_cast<long long>(report_.resolve.unitigsJoined)).c_str(),
+                         report_.resolveSeconds);
+            if (report_.resolve.scaffoldJoins) {
+                std::fprintf(stderr, "      %s scaffold joins spanning %s gap bases\n",
+                             util::commify(static_cast<long long>(report_.resolve.scaffoldJoins)).c_str(),
+                             util::commify(static_cast<long long>(report_.resolve.gapBases)).c_str());
+            }
+        }
+    } else {
+        if (opt_.verbose) std::fprintf(stderr, "[4/7] collecting contigs\n");
+        graph.toContigs(minLen, seqs, covs);
+        // The resolver's counter lines, run=0, so they appear on every run (A2).
+        printResolverCountersNotRun();
+    }
+    // EVAL_PLAN_P2 R2 (TESSERACT_P2_LIBGUARD, default off): the library guard's verdict, measured
+    // by the resolver; the counter line prints on every run (zeros when the flag is off).
+    const p2::EmitConfig p2cfg = p2::readConfig();
+    {
+        LibGuardStats& lg = report_.resolve.libGuard;
+        if (!report_.resolveRun) {
+            lg = LibGuardStats();
+            lg.enabled = p2cfg.libGuard;
+        }
+        std::fprintf(stderr, "%s\n", p2::formatLibGuardCounters(lg).c_str());
+        if (lg.fired && opt_.verbose) {
+            std::fprintf(stderr,
+                         "      library guard: %.1f%% of oriented pairs point outward, FR model fitted on %.1f%% "
+                         "of pairs -- no pair-based joins or circle calls\n",
+                         100.0 * lg.outwardFrac, 100.0 * lg.frFit);
+        }
+    }
+
+    if (opt_.ladderUnion && !ladderReserve.empty()) {
+        const size_t before = seqs.size();
+        const size_t rescued = rescueLadderContigs(ladderReserve, seqs, covs);
+        report_.ladderRescued = rescued;
+        for (size_t i = before; i < seqs.size(); ++i) report_.ladderRescuedBases += seqs[i].size();
+        if (opt_.verbose && rescued) {
+            std::fprintf(stderr,
+                         "      ladder union: %zu contigs (%s bp) resolved at a smaller k and "
+                         "absent from the final graph\n",
+                         rescued,
+                         util::commify(static_cast<long long>(report_.ladderRescuedBases)).c_str());
+        }
+    }
+
+    // What is left unjoined at this point is not weakly supported -- it is
+    // unsupported. The repeats that break these contigs are longer than a
+    // fragment, so no pair could have spoken to them either way. Where a model
+    // of the organism is supplied, those junctions get asked of closed genomes
+    // of the same species instead of guessed at from coverage.
+    // A model named on the command line that cannot be read is fatal, not a
+    // warning. It was only ever printed under --verbose, so a --quiet run
+    // produced a vanilla assembly while the user believed the model had guided
+    // it -- and the two differ in exactly the places the model exists to settle.
+    if (!organismModel_.loaded() && !opt_.organismModelPath.empty()) {
+        std::string err;
+        if (!organismModel_.load(opt_.organismModelPath, err)) {
+            error = err;
+            return false;
+        }
+        // --organism names what the reads are; the model names what it was built
+        // from. If they disagree the model is the wrong one for these reads, and
+        // its joins would be placed from another species' gene order. Compared by canonical
+        // name (N22): the 1.2 Klebsiella models were built as `klebsiella`, the 1.4 ones as
+        // `kpneumoniae`, and either name selects either file.
+        auto lower = [](std::string v) {
+            for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return v;
+        };
+        if (!opt_.organism.empty() && !organismModel_.organism().empty() &&
+            lower(canonicalOrganism(opt_.organism)) !=
+                lower(canonicalOrganism(organismModel_.organism()))) {
+            error = "--organism says '" + opt_.organism + "' but " + opt_.organismModelPath +
+                    " was built for '" + organismModel_.organism() +
+                    "'; use a model for this organism, or drop --organism";
+            return false;
+        }
+    }
+    if (!opt_.isPanelPath.empty() && !isPanel_.loaded()) {
+        std::string err;
+        if (!isPanel_.load(opt_.isPanelPath, err)) {
+            error = err;
+            return false;
+        } else if (opt_.verbose) {
+            std::fprintf(stderr, "      insertion-sequence panel: %s copies, %s k-mers\n",
+                         util::commify(static_cast<long long>(isPanel_.copies())).c_str(),
+                         util::commify(static_cast<long long>(isPanel_.size())).c_str());
+        }
+    }
+    if (!opt_.isSitesPath.empty() && isPanel_.siteCount() == 0) {
+        std::string err;
+        // Fatal for the same reason --model is: a site table the user asked
+        // for and TesserACT could not read changes where contigs are placed.
+        if (!isPanel_.loadSites(opt_.isSitesPath, err)) {
+            error = err;
+            return false;
+        } else if (opt_.verbose) {
+            std::fprintf(stderr, "      insertion sites: %s recurrent loci\n",
+                         util::commify(static_cast<long long>(isPanel_.siteCount())).c_str());
+        }
+    }
+    // Organism Model 2.0, C1 (SEAM): evidence index, junction gate and ledger. Created only when a
+    // TESSERACT_OM2_* flag is set; with none set it stays null and no om2 code runs.
+    std::unique_ptr<om2::SeamContext> om2seam;
+    if (organismModel_.loaded() && !seqs.empty()) {
+        om2seam = om2::SeamContext::create(graph, seqs, reads_, report_.resolve.insert, opt_.threads);
+    }
+    if (organismModel_.loaded() && !seqs.empty()) {
+        if (opt_.verbose) {
+            std::fprintf(stderr, "[4b/7] %s model joining (%u genomes, %u plasmid sets)\n",
+                         organismModel_.organism().c_str(),
+                         organismModel_.genomes(Replicon::Chromosome),
+                         organismModel_.genomes(Replicon::Plasmid));
+        }
+        std::vector<uint32_t> joinSource;
+        report_.organism = joinByModel(organismModel_, seqs, covs, finalK, opt_.verbose,
+                                      isPanel_.loaded() ? &isPanel_ : nullptr, &joinSource,
+                                      om2seam.get());
+        // joinByModel rebuilds the contig vector: chains become one entry and
+        // the survivors come back in a different order. gfaPaths is parallel to
+        // it and has to be permuted with it, or a P line names one contig and
+        // walks another. A contig built by joining has no single walk, so it
+        // gets none.
+        if (!joinSource.empty()) {
+            std::vector<GfaPath> permuted(joinSource.size());
+            for (size_t i = 0; i < joinSource.size(); ++i) {
+                const uint32_t from = joinSource[i];
+                if (from != UINT32_MAX && from < gfaPaths.size()) permuted[i] = gfaPaths[from];
+            }
+            gfaPaths.swap(permuted);
+        }
+        report_.organismRun = true;
+        report_.organismName = organismModel_.organism();
+        report_.organismGenomes = organismModel_.genomes(Replicon::Chromosome);
+        report_.organismPlasmids = organismModel_.genomes(Replicon::Plasmid);
+        report_.organismExcluded = organismModel_.excluded();
+
+        // Then lay the result out against the panel chromosome it most resembles, when
+        // the model carries layout tracks. Adjacency answers one junction at a time and
+        // needs to be right about every one of them; over 666 isolates that reached 23%
+        // of chromosomes closed at 90% or better, against 95.6% for the layout, with
+        // fewer misassemblies and a longer NGA50.
+        //
+        // Order runs join-then-layout because joining first makes the pieces longer, so
+        // each carries more markers to be placed by. What the layout cannot place is kept
+        // exactly as it was: in this cohort that residue is 70% plasmid by base, which is
+        // the part a clinical read-out actually wants to look at.
+        if (organismModel_.trackCount() > 0 && opt_.layout && seqs.size() > 1) {
+            report_.layout = layoutByModel(organismModel_, seqs, covs, finalK, opt_.verbose,
+                                           om2seam.get());
+            // gfaPaths cannot survive a layout that ran: a scaffold is several contigs with
+            // N between them and has no single walk through the graph. Dropping it is
+            // correct; permuting it would name one contig and describe another.
+            //
+            // Only when it ran, though. layoutByModel returns early -- no located markers,
+            // no track sharing 200 of them, nothing placeable -- without touching `seqs`,
+            // and on those runs the walks are still in exact correspondence. Clearing
+            // regardless cost every P record in assembly_graph.gfa, with both --emit-gfa and
+            // --layout on by default and nothing said about it: report.json recorded
+            // `layout.run = false`, which reads as "the layout changed nothing".
+            //
+            // The test is `run && scaffolds`, not a change in contig count: a layout in which
+            // every scaffold holds one contig reorders without changing the count. `scaffolds`
+            // is incremented only inside the flush that builds the new vector, so it is
+            // nonzero exactly when that vector was rebuilt.
+            if (report_.layout.run && report_.layout.scaffolds > 0) gfaPaths.clear();
+            // layoutByModel emits its scaffolds first and appends everything it could not
+            // place, so the leading `scaffolds` entries are the chromosome. Recorded here
+            // because the later stages preserve contig count and order but the output sort
+            // does not.
+            layoutMembers.assign(seqs.size(), 0);
+            for (size_t i = 0; i < report_.layout.scaffolds && i < layoutMembers.size(); ++i) {
+                layoutMembers[i] = 1;
+            }
+        }
+    }
+
+    // [4b2/7] Organism Model 2.0, C4 (om2_clonal.cpp): clonal-anchored closure. Default off
+    // (TESSERACT_OM2_CLONAL): unset, nothing below runs and only the counter line is printed (at the
+    // end of the run). On, the isolate's nearest panel relatives propose joins between the records the
+    // earlier stages left apart, C1 judges each one, and C2 fills them from this isolate's graph.
+    const om2::ClonalOptions om2ClonalOpt = om2::ClonalOptions::fromEnv();
+    std::unique_ptr<om2::ClonalEngine> om2Clonal;
+    om2::ClonalStats om2ClonalStats;
+    om2ClonalStats.enabled = om2ClonalOpt.enabled;
+    if (om2ClonalOpt.enabled) {
+        if (organismModel_.loaded() && organismModel_.trackCount() > 0 && !seqs.empty()) {
+            om2Clonal.reset(new om2::ClonalEngine(organismModel_, om2ClonalOpt));
+            om2Clonal->selectNearest(graph);
+            bool om2NrpLoaded = false;
+            if (!om2ClonalOpt.nrpPath.empty()) {
+                std::string nerr;
+                om2NrpLoaded = om2Clonal->loadPlasmids(om2ClonalOpt.nrpPath, om2::md5File(opt_.organismModelPath), nerr);
+                if (!om2NrpLoaded) std::fprintf(stderr, "[om2-clonal] plasmid sidecar refused: %s\n", nerr.c_str());
+            }
+            om2::ClonalInputs om2Ci{organismModel_, graph, om2seam.get(), opt_.verbose, opt_.outDir};
+            bool om2ClonalChanged = false;
+            om2ClonalStats = om2::runClonalStage(om2Ci, *om2Clonal, seqs, covs, layoutMembers, om2ClonalChanged);
+            om2ClonalStats.nrpLoaded = om2NrpLoaded;
+            om2ClonalStats.plasmidTracks = om2Clonal->plasmidTracks();
+            // A joined or split record has no single graph walk (as after the layout).
+            if (om2ClonalChanged) gfaPaths.clear();
+        } else {
+            om2ClonalStats.skip = "no_model_tracks";
+        }
+    } else if (om2ClonalOpt.anyFlagSet) {
+        std::fprintf(stderr, "[om2-clonal] note: a TESSERACT_OM2_CLONAL_* option is set but TESSERACT_OM2_CLONAL "
+                             "is not; the stage is off\n");
+    }
+
+    // [4c/7] Organism Model 2.0, C2 (om2_close.cpp): repeat bridging, data-driven fills, labelled
+    // allocation and circularisation. Default off (TESSERACT_OM2_CLOSE): unset, the stage returns
+    // without touching the assembly, and only its counter line is printed.
+    // Integration (build_om2): with C1 judging, C2 attaches its fills to C1's rows (located in `seqs`
+    // by C1) instead of recording the gaps again, and C1's verdicts gate its bridges. C2's own rows
+    // (wraps, and N-runs no C1 row owns) and the repeat-variant rows are kept for the writer (C3).
+    const om2::CloseOptions om2CloseOpt = om2::CloseOptions::fromEnv();
+    om2::Ledger om2CloseLedger;
+    std::vector<om2::RepeatVariant> om2Variants;
+    om2::CloseStats om2CloseStats;
+    {
+        std::vector<std::vector<om2::RunOwner>> om2Runs;
+        om2::CloseInputs om2In{graph, reads_, report_.resolve.insert, opt_.outDir, opt_.organismModelPath,
+                               opt_.threads, opt_.verbose};
+        if (om2CloseOpt.enabled && om2seam && om2seam->gating()) {
+            om2Runs = om2seam->runOwners(seqs);
+            om2In.c1 = &om2seam->ledgerForUpdate();
+            om2In.c1Runs = &om2Runs;
+        }
+        if (om2CloseOpt.enabled) om2In.variants = &om2Variants;
+        om2CloseStats = om2::runCloseStage(om2In, om2CloseOpt, seqs, om2CloseLedger);
+        om2::logCloseCounters(om2CloseStats);
+    }
+
+    // Scaffolding wrote the joins it trusts as Ns. Those Ns are a statement
+    // about the graph, not about the data: the reads that cross the join are
+    // still in memory. Closing them here, before polishing, means the bases
+    // that come back are polished with everything else.
+    if (opt_.gapFill && !seqs.empty()) {
+        if (opt_.verbose) std::fprintf(stderr, "[5/7] scaffold gap closing\n");
+        // Organism Model 2.0 C1e: with a SEAM context the ledger maps every gap to its junction,
+        // and in act mode the filler skips the gaps the ledger does not allow.
+        std::vector<uint8_t> om2Allow;
+        size_t om2Blocked = 0;
+        const bool om2Mask = om2seam && om2seam->beforeCloseGaps(seqs, om2Allow);
+        const GapFillStats gs = om2Mask
+            ? closeGaps(seqs, reads_, opt_.threads, 31, 300,
+                        inputAmbiguousReads.empty() ? nullptr : &inputAmbiguousReads, &om2Allow, &om2Blocked)
+            : closeGaps(seqs, reads_, opt_.threads, 31, 300,
+                        inputAmbiguousReads.empty() ? nullptr : &inputAmbiguousReads);
+        if (om2seam) om2seam->afterCloseGaps(seqs, om2Blocked);
+        report_.gapFill = gs;
+        report_.gapFillRun = true;
+        if (opt_.verbose && gs.gapsSeen) {
+            std::fprintf(stderr,
+                         "      %s/%s gaps closed (%s ambiguous, %s unspanned), "
+                         "%s Ns -> %s bases, %.1fs (thin=%zu budget=%zu seedgone=%zu tgtgone=%zu depth=%.0f floor=%.1f)\n",
+                         util::commify(static_cast<long long>(gs.gapsClosed)).c_str(),
+                         util::commify(static_cast<long long>(gs.gapsSeen)).c_str(),
+                         util::commify(static_cast<long long>(gs.gapsAmbiguous)).c_str(),
+                         util::commify(static_cast<long long>(gs.gapsNoPath)).c_str(),
+                         util::commify(static_cast<long long>(gs.nBasesRemoved)).c_str(),
+                         util::commify(static_cast<long long>(gs.basesInserted)).c_str(),
+                         gs.seconds, gs.gapsThinPool, gs.gapsOutOfBudget,
+                         gs.seedBelowFloor, gs.targetBelowFloor, gs.meanLocalDepth, gs.meanFloor);
+        }
+    }
+    // Counter lines of the gap-filler fixes, on every run (OBJECTIVE amendment A2).
+    logGapFillCounters(report_.gapFillRun ? report_.gapFill : gapFillIdleStats());
+    // Organism Model 2.0 C1 counter lines, on every run (zeros without TESSERACT_OM2_*).
+    om2::SeamContext::printCounters(om2seam.get(), stderr);
+
+    // T03 (G-resolve): gaps the filler left open get back the k-1 bases the resolver's
+    // layout left out -- after gap filling, before polishing. Called on every run: it
+    // prints its counter line even with no records.
+    restoreGapFlanks(seqs, gapFlankRecords);
+    // How much of the pileup has to back a base before it replaces what the
+    // graph produced.
+    //
+    // This is deliberately close to unanimity, and the consequence is that the
+    // stage corrects nothing at all on a clean bacterial isolate -- it covers
+    // 99.9998% of assembly positions at 64x and changes zero bases. That looks
+    // like a threshold set too high, and it was tested as one. It is not.
+    //
+    // Lowering it to 0.70 on a panel isolate made 15 corrections and took
+    // mismatches against the closed reference from 0.49 to 0.80 per 100 kbp:
+    // every correction it bought was wrong. The positions where the pileup
+    // disagrees with the contig are collapsed repeats, where the reads come
+    // from several copies at once and the majority belongs to whichever copy is
+    // commonest -- not to the locus being polished. Near-unanimity is what
+    // keeps the stage from rewriting one repeat copy into another.
+    //
+    // So polishing is a guard, not a corrector: it earns its 3 seconds by
+    // confirming the graph consensus already matches the reads, and it should
+    // stay silent. Tunable for experiments; do not lower it on this evidence.
+    const double kPolishFraction = env::real("TESSERACT_POLISH_FRACTION", 0.90);
+
+    if (opt_.polish && !seqs.empty()) {
+        if (opt_.verbose) std::fprintf(stderr, "[6/7] consensus polishing\n");
+        util::Timer t;
+        for (int pass = 0; pass < opt_.polishPasses; ++pass) {
+            const PolishStats ps = polishContigs(seqs, reads_, opt_.threads, 31, 15, kPolishFraction);
+            report_.polish.readsUsed = ps.readsUsed;
+            report_.polish.basesChanged += ps.basesChanged;
+            report_.polish.positionsCovered = ps.positionsCovered;
+            report_.polish.lowCoveragePositions = ps.lowCoveragePositions;
+            report_.polish.meanDepth = ps.meanDepth;
+            if (opt_.verbose) {
+                std::fprintf(stderr,
+                             "      pass %d: %s reads used, mean depth %.1fx, %s bases corrected\n",
+                             pass + 1, util::commify(static_cast<long long>(ps.readsUsed)).c_str(),
+                             ps.meanDepth,
+                             util::commify(static_cast<long long>(ps.basesChanged)).c_str());
+            }
+            if (ps.basesChanged == 0) break;   // converged
+        }
+        report_.polishSeconds = t.elapsed();
+        report_.polishRun = true;
+    }
+    // polishContigs prints the T02 [polish-n] line on every call; a run that never calls it
+    // prints the zero line here, so the counter is present on every run.
+    if (!(opt_.polish && !seqs.empty() && opt_.polishPasses > 0)) logPolishNIdle();
+
+    if (opt_.mapPolisher != Mapper::None) util::makeDirs(opt_.outDir);
+    // The k-mer polisher is blind wherever a base is wrong consistently across
+    // every read covering it: those wrong k-mers are themselves solid. A real
+    // alignment is independent evidence about every position, so it runs last.
+    if (opt_.mapPolisher != Mapper::None && !seqs.empty()) {
+        if (opt_.verbose) {
+            std::fprintf(stderr, "[6b/7] alignment polishing (%s)\n",
+                         mapperName(opt_.mapPolisher));
+        }
+        MapPolishOptions mp;
+        mp.mapper = opt_.mapPolisher;
+        mp.mapperDir = opt_.mapperDir;
+        mp.workDir = opt_.outDir;
+        mp.threads = opt_.threads;
+        mp.verbose = opt_.verbose;
+        for (const Library& lib : opt_.libraries) {
+            if (!lib.r1.empty()) mp.reads1.push_back(lib.r1);
+            if (!lib.r2.empty()) mp.reads2.push_back(lib.r2);
+        }
+        report_.mapPolish = mapPolish(seqs, mp);
+        // Printed even under --quiet. Unlike a model, a failed polish leaves
+        // the contigs correct rather than differently shaped, so it is not
+        // fatal -- but the user did ask for it, and silence is how they end up
+        // believing it happened.
+        if (!report_.mapPolish.error.empty()) {
+            std::fprintf(stderr, "      warning: alignment polishing skipped: %s\n",
+                         report_.mapPolish.error.c_str());
+        }
+    }
+
+
+    // ---- order and name -------------------------------------------------
+    // ---- what molecule is each contig on -----------------------------------
+    // Runs last, on the finished sequences, because everything before it can still change
+    // them: the gap closer rewrites Ns into bases and the polisher corrects them, and a
+    // classification made earlier would describe contigs that no longer exist.
+    //
+    // Read pairs are re-anchored here rather than carried from the resolver. The
+    // resolver's evidence is keyed on unitigs, and the mapping from unitigs to final
+    // contigs is destroyed by joining -- a joined contig has no single graph walk. Anchoring
+    // again costs one pass over the reads and lands every distance directly in the frame
+    // the answer is reported in.
+    RepliconAssignment replicons;
+    {
+        std::unique_ptr<ContigEndLinks> links;
+        // R2: a library the guard rejected gives no pair-based circle or plasmid-grouping call.
+        if (reads_.pairCount() > 0 && report_.resolve.insert.usable && seqs.size() > 1 &&
+            !report_.resolve.libGuard.fired) {
+            if (opt_.verbose) std::fprintf(stderr, "      anchoring pairs onto final contigs\n");
+            links.reset(new ContigEndLinks(seqs, reads_, report_.resolve.insert,
+                                           opt_.threads));
+        }
+        replicons = assignReplicons(seqs, covs, layoutMembers, organismModel_,
+                                    links ? links.get() : nullptr, opt_.verbose);
+    }
+
+    // ---- order the output as a genome, not as a length ranking ---------------
+    // Sorting by length alone scatters the answer: a chromosomal fragment lands between two
+    // plasmids, and the contigs of one plasmid land wherever their sizes put them. The file
+    // is the deliverable, so it is ordered the way it is read -- chromosome first, then each
+    // plasmid molecule whole and contiguous, then what could not be called.
+    //
+    // Group numbers are renumbered here so that `_plas_1` is the largest molecule in the
+    // isolate and file order agrees with the numbering. They were previously handed out in
+    // whatever order the contigs happened to be visited, which is stable but arbitrary.
+    // Renumbering happens before `report_.replicons` is stored, so the report, the GFA and
+    // the FASTA all quote the same number.
+    {
+        std::unordered_map<uint32_t, size_t> groupBases;
+        for (size_t i = 0; i < seqs.size() && i < replicons.calls.size(); ++i) {
+            if (replicons.calls[i].group > 0) groupBases[replicons.calls[i].group] += seqs[i].size();
+        }
+        std::vector<std::pair<size_t, uint32_t>> byBases;   // (-bases, old group)
+        byBases.reserve(groupBases.size());
+        for (const auto& kv : groupBases) byBases.emplace_back(kv.second, kv.first);
+        std::sort(byBases.begin(), byBases.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;   // total order; unordered_map iteration is not one
+        });
+        std::unordered_map<uint32_t, uint32_t> renumber;
+        for (size_t r = 0; r < byBases.size(); ++r) renumber[byBases[r].second] = static_cast<uint32_t>(r + 1);
+        for (RepliconCall& rc : replicons.calls) {
+            if (rc.group > 0) rc.group = renumber[rc.group];
+        }
+    }
+    report_.replicons = replicons;
+
+    // Rank of the block a contig belongs to. Chromosome, then plasmids, then unassigned;
+    // within the plasmids, every grouped molecule (in the new numbering) before the
+    // singletons, whose molecule is unknown and which therefore belong to no block.
+    const size_t nGroups = replicons.plasmidGroups;
+    auto blockOf = [&](size_t i) -> size_t {
+        if (i >= replicons.calls.size()) return nGroups + 2;
+        const RepliconCall& rc = replicons.calls[i];
+        switch (rc.cls) {
+            case RepliconClass::Chromosome: return 0;
+            case RepliconClass::Plasmid:    return rc.group > 0 ? rc.group : nGroups + 1;
+            default:                        return nGroups + 2;
+        }
+    };
+
+    // Inside the chromosome block, a laid-out contig keeps its layout order. The layout
+    // stage places contigs along a panel chromosome and emits its scaffolds in track
+    // order, so for those entries the index IS the position on the reconstructed
+    // chromosome -- the one ordering in this pipeline that was actually paid for. Sorting
+    // them by length would put a 1.9 Mb piece ahead of the 2.4 Mb piece that precedes it
+    // on the genome. It changes nothing when the chromosome closes in a single scaffold,
+    // which is the common case (49 of 50 clinical isolates), and it is exactly right in
+    // the isolates where it did not, which are the ones a reader is looking at.
+    //
+    // Gated on the chromosome block rather than on `layoutMembers` alone: a laid-out
+    // contig shorter than the classifier's floor is left unassigned, and phase must never
+    // disagree with the block it sits in.
+    auto phaseOf = [&](size_t i) -> int {
+        return (blockOf(i) == 0 && i < layoutMembers.size() && layoutMembers[i]) ? 0 : 1;
+    };
+
+    std::vector<size_t> order(seqs.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        const size_t ba = blockOf(a), bb = blockOf(b);
+        if (ba != bb) return ba < bb;
+        const int pa = phaseOf(a), pb = phaseOf(b);
+        if (pa != pb) return pa < pb;
+        if (pa == 0) return a < b;      // track order
+        // Length alone is not a total order and std::sort is not stable, so
+        // equal-length contigs would be numbered by whatever order they arrived
+        // in. The sequence breaks the tie and makes the naming reproducible.
+        if (seqs[a].size() != seqs[b].size()) return seqs[a].size() > seqs[b].size();
+        return seqs[a] < seqs[b];
+    });
+
+    // ---- drop contigs that are exact substrings of a longer contig -----------
+    // Measured over 185 *S. aureus* isolates against each isolate's own closed genome:
+    // 6.2% of our contigs (3.5 per isolate) are exact substrings of a longer contig of the
+    // same assembly, and contigs wholly contained in another carry 47% of our QUAST
+    // duplication excess. SPAdes emits 0 of 1554. The cause is repeat resolution: once a
+    // low-copy repeat is resolved into its flanking chains the standalone repeat unitig is
+    // still emitted, so the same bases are written twice -- QUAST counts them twice in the
+    // numerator of the duplication ratio and once in the denominator.
+    //
+    // Dropping such a contig cannot lose sequence: it is, literally, still present inside
+    // the longer contig. Only EXACT containment qualifies. Near-copies that share a core
+    // but differ are real variant sequence and are left alone, which is why this is a
+    // substring test and not a k-mer containment test.
+    std::vector<char> contained(seqs.size(), 0);
+    size_t containedN = 0, containedBases = 0;
+    DedupStats dedup;
+    if (opt_.dedupContained && seqs.size() > 1) {
+        util::Timer dt;
+        // A plasmid call, and a contig whose own two ends the pairs joined, are results and not
+        // merely sequence. Deleting one because its bases also appear inside the chromosome
+        // would remove a finding from the report, so these are never dropped however redundant
+        // their sequence is.
+        std::vector<char> protectedCall(seqs.size(), 0);
+        for (size_t idx = 0; idx < seqs.size(); ++idx) {
+            protectedCall[idx] =
+                idx < replicons.calls.size() &&
+                (replicons.calls[idx].cls == RepliconClass::Plasmid || replicons.calls[idx].circular);
+        }
+        // T37: the release longest-first substring test, unchanged in every decision, with an
+        // exact negative prefilter in front of each find (up to 180 s on one isolate before).
+        contained = markContained(seqs, protectedCall, nullptr, &dedup);
+        containedN = dedup.dropped;
+        containedBases = dedup.droppedBases;
+        if (opt_.verbose && containedN) {
+            std::fprintf(stderr,
+                         "      %zu contigs (%zu bp) dropped as exact substrings of a longer contig, %.1fs\n",
+                         containedN, containedBases, dt.elapsed());
+        }
+    }
+    std::fprintf(stderr, "[dedup] queried=%zu exact_searches=%zu dropped=%zu dropped_bp=%zu\n",
+                 dedup.queried, dedup.exactSearches, dedup.dropped, dedup.droppedBases);
+
+    std::vector<std::string> outSeqs, outNames;
+    // Kept beside each scaffold so the gap split at the write can rebuild a name in the
+    // documented format. The replicon tag has to stay at the END of the name: aligners
+    // and scorers ignore anything after the first space, which is why the call was put
+    // in the name rather than after it.
+    std::vector<std::string> outTags;
+    std::vector<double> outCovs;
+    std::vector<GfaPath> outPaths;
+    // Per written scaffold: its walk (empty when it has none) and whether it is a protected
+    // call (plasmid or circular). Read by the G-emit split post-processing and AGP/GFA v2.
+    std::vector<GfaPath> outPathOf;
+    std::vector<char> outProtected;
+    outSeqs.reserve(order.size());
+    outNames.reserve(order.size());
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+        const size_t i = order[rank];
+        if (contained[i]) continue;
+        // The replicon tag goes on the end of the existing name so nothing that parses
+        // the old format breaks. `chr` and `plas` are the call; the trailing number on a
+        // plasmid is a GROUP, present only when read pairs tied several contigs to the
+        // same molecule, and absent rather than invented when they did not. `circular`
+        // means this contig's own two ends are joined by pairs -- a finished molecule,
+        // which for a plasmid is the difference between a contig and a result.
+        char tag[48];
+        tag[0] = '\0';
+        if (i < replicons.calls.size()) {
+            const RepliconCall& rc = replicons.calls[i];
+            const char* cls = rc.cls == RepliconClass::Chromosome ? "chr"
+                            : rc.cls == RepliconClass::Plasmid    ? "plas"
+                                                                  : "unk";
+            if (rc.cls == RepliconClass::Plasmid && rc.group > 0) {
+                std::snprintf(tag, sizeof(tag), "_%s_%u%s", cls, rc.group,
+                              rc.circular ? "_circular" : "");
+            } else {
+                std::snprintf(tag, sizeof(tag), "_%s%s", cls,
+                              rc.circular ? "_circular" : "");
+            }
+        }
+        char name[224];
+        // Numbered by what is actually written, not by position in `order`: a dropped
+        // contained contig must not leave a hole in the NODE numbering.
+        std::snprintf(name, sizeof(name), "NODE_%zu_length_%zu_cov_%.4f%s",
+                      outNames.size() + 1, seqs[i].size(), covs[i], tag);
+        outNames.emplace_back(name);
+        outTags.emplace_back(tag);
+        outCovs.push_back(covs[i]);
+
+        ContigRecord rec;
+        rec.length = seqs[i].size();
+        rec.coverage = covs[i];
+        size_t gc = 0, ns = 0;
+        for (char c : seqs[i]) {
+            if (c == 'G' || c == 'C') ++gc;
+            else if (c == 'N') ++ns;
+        }
+        const size_t called = seqs[i].size() - ns;
+        rec.gcPercent = called ? 100.0 * static_cast<double>(gc) / static_cast<double>(called) : 0;
+        rec.gapBases = ns;
+        report_.contigs.push_back(rec);
+
+        if (i < gfaPaths.size() && !gfaPaths[i].oriented.empty()) {
+            GfaPath gp = gfaPaths[i];
+            gp.name = name;
+            outPaths.push_back(std::move(gp));
+        }
+        outPathOf.push_back(i < gfaPaths.size() ? gfaPaths[i] : GfaPath());
+        outProtected.push_back(i < replicons.calls.size() &&
+                               (replicons.calls[i].cls == RepliconClass::Plasmid || replicons.calls[i].circular));
+        outSeqs.push_back(std::move(seqs[i]));
+    }
+    report_.command = opt_.commandLine;
+    report_.finalize();
+
+    // ---- write outputs --------------------------------------------------
+    if (!util::makeDirs(opt_.outDir)) {
+        error = "cannot create output directory " + opt_.outDir;
+        return false;
+    }
+    if (opt_.verbose) std::fprintf(stderr, "[7/7] writing output\n");
+    // T34: an output this run does not write must not survive from an earlier run into the
+    // same directory -- a gap-free run would otherwise sit beside another assembly's
+    // scaffolds.fasta/.agp. Every optional name goes; the ones this run writes are rewritten.
+    {
+        size_t staleRemoved = 0;
+        for (const char* nm : {"scaffolds.fasta", "scaffolds.agp", "unitigs.fasta",
+                               "assembly_graph.gfa", "report.html", "replicons.tsv", "p2_edits.tsv",
+                               "ends.tsv", "p2_self_qa.tsv", "p2_self_qa.contigs.tsv",
+                               "p2_self_qa.missing_hi.tsv", "p2_self_qa.absent.bed"}) {
+            const std::string p = opt_.outDir + "/" + nm;
+            if (std::remove(p.c_str()) == 0) ++staleRemoved;
+        }
+        std::fprintf(stderr, "[outputs] stale_removed=%zu\n", staleRemoved);
+    }
+    const bool agpGfaV2 = emitfix::enabled(emitfix::kAgpGfaV2);
+    AgpGfaStats agpStats;
+    agpStats.enabled = agpGfaV2;
+
+    // A gap is an assertion of adjacency with no sequence behind it. Emitting it as N
+    // inside contigs.fasta states in the delivered file something the reads never showed,
+    // and it is invisible to anyone who does not know to split first -- QUAST has to be
+    // told (-s) before it scores honestly, and bench/run_benchmark.sh forgets to, which
+    // is precisely how a scaffold-against-contig table gets published.
+    //
+    // So contigs.fasta is now what its name claims: contigs, split at every gap, zero N.
+    // The ordered, oriented form is kept whole in scaffolds.fasta and scaffolds.agp
+    // records order, orientation and gap length, so the scaffolding is not lost -- it is
+    // simply no longer asserted as sequence.
+    //
+    // The split happens HERE, at the write, and nowhere earlier. Replicon assignment and
+    // polishing reason over scaffold-scale sequence (replicon.cpp's 500 bp classifiable
+    // floor, and its circularity test against the longest chromosome), so splitting
+    // sooner would change replicon calls, plasmid grouping and file order. Every stage
+    // still sees exactly what it saw before.
+    size_t gapBasesTotal = 0;
+    for (const std::string& sq : outSeqs) {
+        for (char c : sq) if (c == 'N' || c == 'n') ++gapBasesTotal;
+    }
+
+    // EVAL_PLAN_P2 R3/F5 edit records and their names after the split, so with either flag on the
+    // scaffold files are written after that stage (the same writer, the edited records).
+    auto writeScaffoldFiles = [&]() -> bool {
+        const std::string scafPath = opt_.outDir + "/scaffolds.fasta";
+        if (!writeFasta(scafPath, outSeqs, outNames, 80, error)) return false;
+        if (opt_.verbose) std::fprintf(stderr, "      %s\n", scafPath.c_str());
+
+        const std::string agpPath = opt_.outDir + "/scaffolds.agp";
+        std::FILE* agp = agpGfaV2 ? nullptr : std::fopen(agpPath.c_str(), "w");
+        if (agp) {
+            std::fprintf(agp, "##agp-version\t2.1\n");
+            std::fprintf(agp, "# TesserACT -- order and orientation of contigs.fasta.\n");
+            std::fprintf(agp, "# An N row is an adjacency the assembly asserts without\n"
+                              "# sequence; it is not evidence of the intervening bases.\n");
+            for (size_t i = 0; i < outSeqs.size(); ++i) {
+                const std::string& sq = outSeqs[i];
+                size_t part = 0, pos = 0, piece = 0;
+                while (pos < sq.size()) {
+                    size_t e = pos;
+                    while (e < sq.size() && sq[e] != 'N' && sq[e] != 'n') ++e;
+                    if (e > pos) {
+                        ++part; ++piece;
+                        std::fprintf(agp, "%s\t%zu\t%zu\t%zu\tW\t%s_%zu\t1\t%zu\t+\n",
+                                     outNames[i].c_str(), pos + 1, e, part,
+                                     outNames[i].c_str(), piece, e - pos);
+                    }
+                    size_t g = e;
+                    while (g < sq.size() && (sq[g] == 'N' || sq[g] == 'n')) ++g;
+                    if (g > e) {
+                        ++part;
+                        std::fprintf(agp,
+                                     "%s\t%zu\t%zu\t%zu\tN\t%zu\tscaffold\tyes\talign_genus\n",
+                                     outNames[i].c_str(), e + 1, g, part, g - e);
+                    }
+                    pos = g > e ? g : e;
+                }
+            }
+            std::fclose(agp);
+            if (opt_.verbose) std::fprintf(stderr, "      %s\n", agpPath.c_str());
+        }
+        return true;
+    };
+    if (gapBasesTotal > 0 && !p2cfg.recordStage()) {
+        if (!writeScaffoldFiles()) return false;
+    }
+
+    // ---- split at every gap -------------------------------------------------
+    std::vector<EmitPiece> pieces = splitAtGaps(outSeqs, outTags, outCovs);
+
+    // T25 (TESSERACT_FIX_SPLIT_POSTPROCESS): a piece is a record too. Its coverage comes from
+    // its own stretch of the walk, a multi-piece scaffold's _circular tag is not the piece's,
+    // and the length floor and exact-containment test every whole record met apply to it.
+    {
+        SplitPostStats sp;
+        sp.enabled = emitfix::enabled(emitfix::kSplitPostprocess);
+        splitPostprocess(pieces, outSeqs, outPathOf, &graph, outProtected, minLen, sp);
+        logSplitPost(sp);
+    }
+
+    // ---- trim the second copy of a repeat shared by two contig ends ----------
+    // Applied to the split contigs, because those are what is scored and what a reader
+    // uses. The overlap is removed from the SHORTER partner only, so the longer contig --
+    // the one with more context around the repeat -- keeps it, and the assembly still
+    // contains every base it did before, once.
+    // T10 (TESSERACT_FIX_BOUNDARY_SAFE_TRIM): that last claim was false -- the victim lost
+    // its k-1 flank-to-overlap k-mers, and equal-length partners were both cut. T22
+    // (TESSERACT_FIX_TRIM_COPY_GUARD): the victim was chosen by length, blind to how many
+    // copies the segment has; see trimTerminalOverlaps().
+    std::vector<size_t> live;
+    for (size_t i = 0; i < pieces.size(); ++i) if (!pieces[i].drop) live.push_back(i);
+    std::vector<std::string> splitSeqs;
+    splitSeqs.reserve(live.size());
+    for (size_t i : live) splitSeqs.push_back(pieces[i].seq);
+    size_t trimmedN = 0, trimmedBases = 0;
+    TrimConfig trimCfg;
+    trimCfg.minOverlap = std::max<size_t>(opt_.trimTerminalOverlap, static_cast<size_t>(finalK));
+    trimCfg.k = finalK;
+    trimCfg.boundarySafe = emitfix::enabled(emitfix::kBoundarySafeTrim);
+    trimCfg.copyGuard = emitfix::enabled(emitfix::kTrimCopyGuard);
+    TrimStats trimStats;
+    if (opt_.trimTerminalOverlap > 0 && splitSeqs.size() > 1) {
+        util::Timer tt;
+        const std::vector<std::string> preTrim = trimCfg.copyGuard ? splitSeqs : std::vector<std::string>();
+        const EndEvidenceFn evidence = [&](const std::vector<EndQuery>& q) {
+            return gatherEndEvidence(preTrim, q, reads_, report_.resolve.insert, opt_.threads);
+        };
+        std::vector<size_t> cutFront, cutBack;
+        trimStats = trimTerminalOverlaps(splitSeqs, trimCfg, cutFront, cutBack,
+                                         trimCfg.copyGuard ? &evidence : nullptr);
+        trimmedN = trimStats.trimmed;
+        trimmedBases = trimStats.trimmedBases;
+        for (size_t j = 0; j < live.size(); ++j) {
+            EmitPiece& p = pieces[live[j]];
+            p.cutFrontSeq = p.seq.substr(0, cutFront[j]);
+            p.cutBackSeq = p.seq.substr(p.seq.size() - cutBack[j]);
+            p.seq = splitSeqs[j];
+        }
+        if (opt_.verbose && trimmedN) {
+            std::fprintf(stderr,
+                         "      %zu terminal repeat overlaps trimmed (%zu bp, min %zu), %.1fs\n",
+                         trimmedN, trimmedBases, trimCfg.minOverlap, tt.elapsed());
+        }
+    }
+    logTrimCounters(trimCfg, trimStats);
+    report_.trimmedOverlaps = trimmedN;
+    report_.trimmedOverlapBases = trimmedBases;
+
+    // ---- EVAL_PLAN_P2 W1 emit-A: F5 spike-in labels and R3 exact / verified circles ----------
+    // On the records as they will be written (after the split and the terminal trim), the frame
+    // the backward finishing prototype measured. Default off; the counter lines print on every run.
+    p2::RecordStageResult p2res;
+    if (p2cfg.recordStage()) {
+        p2::RecordStageIn rin;
+        rin.cfg = p2cfg;
+        rin.pieces = &pieces;
+        rin.scaffolds = &outSeqs;
+        rin.scaffoldTags = &outTags;
+        rin.scaffoldPaths = &outPathOf;
+        rin.graph = &graph;
+        rin.reads = &reads_;
+        rin.ladder = ladder;
+        rin.threads = opt_.threads;
+        p2res = p2::applyRecordStage(rin);
+        for (size_t j = 0; j < live.size(); ++j) splitSeqs[j] = pieces[live[j]].seq;
+        for (size_t sc : p2res.scaffoldsChanged) {
+            char name[224];
+            std::snprintf(name, sizeof(name), "NODE_%zu_length_%zu_cov_%.4f%s", sc + 1, outSeqs[sc].size(),
+                          outCovs[sc], outTags[sc].c_str());
+            outNames[sc] = name;
+            if (sc < report_.contigs.size()) {
+                ContigRecord& rec = report_.contigs[sc];
+                size_t gc = 0, ns = 0;
+                for (char c : outSeqs[sc]) {
+                    if (c == 'G' || c == 'C') ++gc;
+                    else if (c == 'N') ++ns;
+                }
+                rec.length = outSeqs[sc].size();
+                const size_t called = rec.length - ns;
+                rec.gcPercent = called ? 100.0 * static_cast<double>(gc) / static_cast<double>(called) : 0;
+                rec.gapBases = ns;
+            }
+        }
+        if (!p2res.scaffoldsChanged.empty()) report_.finalize();
+        if (opt_.verbose && p2cfg.circ != p2::CircMode::Off) {
+            std::fprintf(stderr, "      circles (%s): %zu candidates, %zu written circular, %zu linear\n",
+                         p2::circModeName(p2cfg.circ), p2res.st.candidates, p2res.st.writtenCircular,
+                         p2res.st.writtenLinear);
+        }
+        if (opt_.verbose && p2cfg.spikein && p2res.st.spikein) {
+            std::fprintf(stderr, "      %zu phiX174 spike-in record(s) labelled _spikein\n", p2res.st.spikein);
+        }
+    }
+    std::fprintf(stderr, "%s\n", p2::formatCircCounters(p2cfg, p2res.st).c_str());
+    std::fprintf(stderr, "%s\n", p2::formatSpikeinCounters(p2cfg, p2res.st).c_str());
+    if (gapBasesTotal > 0 && p2cfg.recordStage()) {
+        if (!writeScaffoldFiles()) return false;
+    }
+
+    std::vector<std::string> splitNames;
+    splitNames.reserve(splitSeqs.size());
+    for (size_t j = 0; j < live.size(); ++j) {
+        EmitPiece& p = pieces[live[j]];
+        char nm[256];
+        std::snprintf(nm, sizeof(nm), "NODE_%zu_length_%zu_cov_%.4f%s",
+                      j + 1, p.seq.size(), p.cov, p.tag.c_str());
+        p.name = nm;
+        splitNames.emplace_back(nm);
+    }
+    // T17: the contig statistics describe the records contigs.fasta holds.
+    computeContigStats(splitSeqs, outSeqs, report_);
+
+    // Phase 2 emit-B (default off): ends.tsv and lower-case unsupported tips, k-mer self-QA and the
+    // detection report, from one pass over the raw read files. Runs on the records exactly as they
+    // are written; with TESSERACT_P2_TIPS_LOWERCASE only the bytes written to contigs.fasta change
+    // case -- splitSeqs, the pieces, the AGP, the GFA and every statistic keep the upper-case records.
+    std::vector<std::string> p2Written;
+    bool p2Replaced = false;
+    if (p2state.opt.needsReadPass()) {
+        p2::EmitBRecords pr;
+        pr.outDir = opt_.outDir;
+        pr.seqs = &splitSeqs;
+        pr.names = &splitNames;
+        for (size_t j : live) pr.covs.push_back(pieces[j].cov);
+        pr.reads = &reads_;
+        pr.insert = report_.resolve.insert;
+        pr.threads = opt_.threads;
+        pr.libraries = opt_.libraries;
+        p2Replaced = p2::runEmitBRecords(pr, p2state, p2Written);
+    }
+
+    // Phase 2 (EVAL_PLAN_P2 s5.2): ONE per-record edit log for every W1 feature that edits a record
+    // -- emit-A's R3 / F5 rows, then emit-B's lower-case tip rows -- written here, by this one writer,
+    // before contigs.fasta (the lower-case tips are never written without their log). Coordinates are
+    // 0-based, half-open, in the record as assembled before that edit. With those flags off no edit
+    // log is written.
+    if (p2cfg.recordStage() || p2state.opt.lowercase) {
+        std::vector<std::string> p2EditRows;
+        if (p2cfg.recordStage()) p2EditRows = p2::formatEditRows(p2res, pieces);
+        p2EditRows.insert(p2EditRows.end(), p2state.edits.begin(), p2state.edits.end());
+        if (!p2::writeEditLog(opt_.outDir + "/p2_edits.tsv", p2EditRows, error)) return false;
+    }
+    const std::string contigPath = opt_.outDir + "/contigs.fasta";
+    if (!writeFasta(contigPath, p2Replaced ? p2Written : splitSeqs, splitNames, 80, error)) return false;
+    if (p2cfg.recordStage()) {
+        std::string p2err;
+        if (!p2::writeRepliconsTsv(opt_.outDir + "/replicons.tsv", p2res, pieces, p2err)) {
+            error = p2err;
+            return false;
+        }
+    }
+    // emit-A's members of the report.json "p2" block (r2, r3, f5); merged into the one block below.
+    const std::string p2aMembers = p2::reportJsonMembers(p2cfg, report_.resolve.libGuard,
+                                                         p2cfg.recordStage() ? &p2res : nullptr,
+                                                         p2cfg.recordStage() ? &pieces : nullptr);
+    if (opt_.verbose) {
+        if (gapBasesTotal > 0) {
+            std::fprintf(stderr,
+                         "      %s  (%zu contigs, split at %zu gap bases; "
+                         "scaffolded form in scaffolds.fasta)\n",
+                         contigPath.c_str(), splitSeqs.size(), gapBasesTotal);
+        } else {
+            std::fprintf(stderr, "      %s\n", contigPath.c_str());
+        }
+    }
+
+    if (opt_.emitUnitigs) {
+        std::vector<std::string> us;
+        std::vector<double> ucov;
+        graph.toContigs(static_cast<size_t>(finalK), us, ucov);
+        std::vector<std::string> un;
+        un.reserve(us.size());
+        for (size_t i = 0; i < us.size(); ++i) {
+            char nm[160];
+            std::snprintf(nm, sizeof(nm), "UNITIG_%zu_length_%zu_cov_%.4f",
+                          i + 1, us[i].size(), ucov[i]);
+            un.emplace_back(nm);
+        }
+        const std::string up = opt_.outDir + "/unitigs.fasta";
+        if (!writeFasta(up, us, un, 80, error)) return false;
+        if (opt_.verbose) std::fprintf(stderr, "      %s\n", up.c_str());
+    }
+
+    // T26 (TESSERACT_FIX_AGP_GFA_V2): the AGP names the records contigs.fasta holds, with
+    // their final coordinates, and tiles every base the trim or dedup took from a piece with
+    // the record still holding it. Every N in these runs comes from the read-pair scaffolder
+    // unless a model joined or laid out contigs, whose gaps are not told apart here.
+    if (agpGfaV2 && gapBasesTotal > 0) {
+        const std::string agpPath = opt_.outDir + "/scaffolds.agp";
+        const bool modelGaps = report_.organismRun || report_.layout.run;
+        if (!writeAgpV2(agpPath, outSeqs, outNames, pieces, modelGaps ? "unspecified" : "paired-ends",
+                        agpStats, error)) {
+            return false;
+        }
+        if (opt_.verbose) std::fprintf(stderr, "      %s\n", agpPath.c_str());
+    }
+    if (opt_.emitGfa) {
+        const std::string gp = opt_.outDir + "/assembly_graph.gfa";
+        // T26: one P-line per written contig whose own gap-free walk spells it exactly, named
+        // as in contigs.fasta; the release wrote scaffold walks under scaffold names, with
+        // gap steps the gap filler had since closed.
+        const std::vector<GfaPath> pathsV2 =
+            agpGfaV2 ? contigPathsV2(outSeqs, outPathOf, graph, pieces, agpStats) : std::vector<GfaPath>();
+        if (!writeGfa(gp, graph, agpGfaV2 ? pathsV2 : outPaths, report_.gfaSegments, report_.gfaLinks, error)) {
+            return false;
+        }
+        if (opt_.verbose) {
+            std::fprintf(stderr, "      %s  (%s segments, %s links)\n", gp.c_str(),
+                         util::commify(static_cast<long long>(report_.gfaSegments)).c_str(),
+                         util::commify(static_cast<long long>(report_.gfaLinks)).c_str());
+        }
+    }
+
+    logAgpGfa(agpStats);
+
+    // Organism Model 2.0 C1: the junction ledger, located in the scaffolds as written.
+    if (om2seam && om2seam->gating()) {
+        std::string om2err;
+        if (!om2seam->writeTsv(opt_.outDir + "/om2_seams.tsv", outSeqs, outNames, om2err))
+            std::fprintf(stderr, "      warning: %s\n", om2err.c_str());
+    }
+
+    // Organism Model 2.0, C3 (default OFF: TESSERACT_OM2_OUTPUT, TESSERACT_OM2_AGP_EVIDENCE). The
+    // genome/ owner view is written from the records above, which it only reads; the counter line
+    // prints on every run. C1's junction ledger and C2's fills attach at `ledger`/`variants`.
+    {
+        om2::SurfaceInput si;
+        si.outDir = opt_.outDir;
+        si.scaffoldsFile = gapBasesTotal > 0;
+        si.seqs = si.scaffoldsFile ? &outSeqs : &splitSeqs;
+        si.names = si.scaffoldsFile ? &outNames : &splitNames;
+        si.modelRan = report_.organismRun || report_.layout.run;
+        if (report_.organismRun) { si.modelPath = opt_.organismModelPath; si.modelName = report_.organismName; }
+        // Integration (build_om2): one ledger for the writer, index = junction id: C1's rows (with
+        // C2's fills attached), then C2's own rows. Handed over only when an om2 stage acted or the
+        // writer was asked for: C1 in audit mode records and never acts, so its admissions are not
+        // applied (every C1 row reads as admitted to scaffolds) and alone it hands nothing over.
+        om2::Ledger om2All;
+        std::vector<std::vector<om2::RunOwner>> om2Owner;
+        om2::DnaaSketch om2Dnaa;
+        const bool om2C1 = om2seam && om2seam->gating();
+        const bool om2C1Act = om2C1 && om2seam->config().act();
+        if (om2C1Act || om2CloseStats.enabled || om2::outputEnabled() || om2::agpEvidenceEnabled()) {
+            if (om2C1) {
+                om2All.j = om2seam->ledger().j;
+                if (!om2C1Act) for (om2::Junction& j : om2All.j) j.admit = om2::Admit::Scaffold;
+                om2Owner = om2seam->runOwners(*si.seqs);
+                si.runOwner = &om2Owner;
+            }
+            om2All.j.insert(om2All.j.end(), om2CloseLedger.j.begin(), om2CloseLedger.j.end());
+            for (int w = 0; w < 64; ++w) om2All.rotateOffset[w] = om2CloseLedger.rotateOffset[w];
+            if (!om2All.j.empty()) si.ledger = &om2All;
+            if (!om2Variants.empty()) si.variants = &om2Variants;
+            if (om2CloseStats.dnaaLoaded) {
+                std::string derr;
+                if (om2Dnaa.load(om2CloseOpt.dnaa, om2::md5File(opt_.organismModelPath), derr)) {
+                    si.originLocator = [&om2Dnaa](const std::string& rec) -> int64_t {
+                        const om2::DnaaSketch::Hit h = om2Dnaa.locate(rec);
+                        if (!h.found) return -1;
+                        return h.reverse ? -2 - h.offset : h.offset;
+                    };
+                }
+            }
+            if (!om2CloseOpt.rrnPrior.empty()) si.sidecars.emplace_back("rrn_prior", om2CloseOpt.rrnPrior);
+            if (!om2CloseOpt.dnaa.empty()) si.sidecars.emplace_back("dnaa", om2CloseOpt.dnaa);
+            // the C1 and C2 counter lines, as printed, for the report.json om2 block
+            char* cbuf = nullptr;
+            size_t clen = 0;
+            if (std::FILE* mf = open_memstream(&cbuf, &clen)) {
+                om2::SeamContext::printCounters(om2seam.get(), mf);
+                std::fclose(mf);
+                const std::string lines(cbuf ? cbuf : "", clen);
+                std::free(cbuf);
+                size_t at = 0;
+                while (at < lines.size()) {
+                    size_t e = lines.find('\n', at);
+                    if (e == std::string::npos) e = lines.size();
+                    const std::string ln = lines.substr(at, e - at);
+                    if (ln.rfind("[om2-evidence]", 0) == 0) si.stageCounters.emplace_back("om2_evidence", ln);
+                    if (ln.rfind("[om2-seam]", 0) == 0) si.stageCounters.emplace_back("om2_seam", ln);
+                    at = e + 1;
+                }
+            }
+            si.stageCounters.emplace_back("om2_close", om2::formatCloseCounters(om2CloseStats));
+        }
+        // C4: the clonal annotator (junction labels, nearest relatives in closure.txt). Only when the
+        // clonal stage ran; otherwise si.clonal stays null and the writer is exactly C3's.
+        std::unique_ptr<om2::ClonalSurface> om2ClonalSurface;
+        if (om2Clonal) {
+            om2ClonalSurface.reset(new om2::ClonalSurface(*om2Clonal, om2seam.get(), om2ClonalStats));
+            si.clonal = om2ClonalSurface.get();
+        }
+        const om2::SurfaceStats os = om2::writeSurface(si, report_.om2Json);
+        om2::logSurfaceCounters(os);
+        if (!os.ok) { error = os.error; return false; }
+        // 1.5 layout-only view: scaffolds.fasta was cut at the junctions this isolate does not confirm,
+        // so report.json and report.html restate their record table from the records as written.
+        if (os.layoutOnly && !os.scaffoldParts.empty() && si.scaffoldsFile) {
+            std::vector<ContigRecord> parts;
+            parts.reserve(os.scaffoldParts.size());
+            for (const auto& pr : os.scaffoldParts) {
+                const std::string& q = (*si.seqs)[pr.first];
+                ContigRecord rec;
+                rec.length = pr.second.second - pr.second.first;
+                rec.coverage = pr.first < report_.contigs.size() ? report_.contigs[pr.first].coverage : 0;
+                size_t gc = 0, ns = 0;
+                for (size_t i = pr.second.first; i < pr.second.second && i < q.size(); ++i) {
+                    const char c = q[i];
+                    if (c == 'G' || c == 'C') ++gc;
+                    else if (c == 'N') ++ns;
+                }
+                const size_t called = rec.length - ns;
+                rec.gcPercent = called ? 100.0 * static_cast<double>(gc) / static_cast<double>(called) : 0;
+                rec.gapBases = ns;
+                parts.push_back(rec);
+            }
+            report_.contigs.swap(parts);
+            report_.finalize();
+        }
+    }
+    // Organism Model 2.0 C4 counter line, on every run (zeros without TESSERACT_OM2_CLONAL).
+    om2::logClonalCounters(om2ClonalStats);
+
+    // Phase 2 emit-B: the provenance manifest, the report.json "p2" block (always written; enabled=0
+    // and zero counters when every flag is off) and the counter lines (always printed).
+    if (p2state.opt.provenance) {
+        if (!p2prov.started()) p2prov.start(p2provIn);
+        p2state.provenanceJson = p2prov.finishJson(opt_.threads, stats_.kUsed);
+        p2state.provFiles = p2prov.filesHashed();
+        p2state.provBytes = p2prov.bytesHashed();
+    }
+    report_.p2Json = p2::p2BlockJson(p2state, p2aMembers, p2cfg.any());
+    {
+        AssemblyReport::P2Html& h = report_.p2;
+        h.selfQa = p2state.sqa.ran;
+        if (h.selfQa) {
+            h.alarm = p2state.sqa.alarm;
+            h.verdict = p2::selfQaVerdict(p2state.sqa);
+            h.completeness = p2state.sqa.completeness;
+            h.qvRead0 = p2state.sqa.qvRead0;
+            h.missingGt10x = p2state.sqa.missingBpEst(p2::kSqaBins - 1);
+            h.missing3to10 = p2state.sqa.missingBpEst(p2::kSqaBins - 2);
+            h.spikeSolid = p2state.sqa.spikeSolid;
+            h.spikeRef = p2state.sqa.spikeRef;
+        }
+        h.ends = p2state.endsRan;
+        if (h.ends) {
+            h.endRows = p2state.ends.ends;
+            h.endsAudited = p2state.ends.audited;
+            h.tipEnds = p2state.ends.tipEnds;
+            h.tipBases = p2state.ends.tipBases;
+            h.lowercasedBases = p2state.ends.lowercasedBases;
+        }
+        h.detect = p2state.det.ran;
+        if (h.detect && !p2state.det.scores.empty()) {
+            h.detectBest = p2state.det.scores[0].name;
+            h.detectBestScore = p2state.det.best();
+            h.detectCall = p2state.det.accepted() ? p2state.det.scores[0].name : std::string("none");
+        }
+        h.provenance = p2state.opt.provenance;
+    }
+    p2::logEmitBCounters(p2state, stderr);
+
+    stats_.contigs = report_.contigs.size();   // == outSeqs.size() unless the 1.5 layout-only view cut scaffolds
+    stats_.totalLength = report_.totalLength;
+    stats_.largest = report_.largest;
+    stats_.n50 = report_.n50;
+    stats_.gcPercent = report_.gcPercent;
+    stats_.meanCoverage = report_.meanCoverage;
+    stats_.seconds = total.elapsed();
+    report_.totalSeconds = stats_.seconds;
+    report_.peakMemoryBytes = static_cast<double>(util::peakMemoryBytes());
+
+    {
+        std::string err;
+        const std::string jp = opt_.outDir + "/report.json";
+        if (writeJsonReport(jp, report_, err)) {
+            if (opt_.verbose) std::fprintf(stderr, "      %s\n", jp.c_str());
+        } else {
+            std::fprintf(stderr, "      warning: %s\n", err.c_str());
+            if (diagnosticBatch.isChild()) { error = err; return false; }
+        }
+    }
+    if (opt_.emitHtml) {
+        std::string err;
+        const std::string hp = opt_.outDir + "/report.html";
+        if (writeHtmlReport(hp, report_, err)) {
+            if (opt_.verbose) std::fprintf(stderr, "      %s\n", hp.c_str());
+        } else {
+            std::fprintf(stderr, "      warning: %s\n", err.c_str());
+        }
+    }
+    if (!diagnosticBatch.finishChild(stats_.seconds, error)) return false;
+    return true;
+}
+
+void AssemblyReport::finalize() {
+    totalLength = 0;
+    gapBases = 0;
+    largest = 0;
+    double covWeighted = 0, gcWeighted = 0;
+    size_t calledTotal = 0;
+    for (const ContigRecord& c : contigs) {
+        totalLength += c.length;
+        gapBases += c.gapBases;
+        largest = std::max(largest, c.length);
+        covWeighted += c.coverage * static_cast<double>(c.length);
+        const size_t called = c.length - c.gapBases;
+        gcWeighted += c.gcPercent * static_cast<double>(called);
+        calledTotal += called;
+    }
+    meanCoverage = totalLength ? covWeighted / static_cast<double>(totalLength) : 0;
+    gcPercent = calledTotal ? gcWeighted / static_cast<double>(calledTotal) : 0;
+
+    std::vector<size_t> lens;
+    lens.reserve(contigs.size());
+    for (const ContigRecord& c : contigs) lens.push_back(c.length);
+    std::sort(lens.begin(), lens.end(), std::greater<size_t>());
+    size_t acc = 0;
+    n50 = n90 = l50 = 0;
+    for (size_t i = 0; i < lens.size(); ++i) {
+        acc += lens[i];
+        if (!n50 && acc * 2 >= totalLength) { n50 = lens[i]; l50 = i + 1; }
+        if (!n90 && acc * 10 >= totalLength * 9) { n90 = lens[i]; break; }
+    }
+}
+
+}  // namespace ts

@@ -1,0 +1,471 @@
+#include "counter.h"
+
+#include "util.h"
+
+#include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <thread>
+
+namespace ts {
+namespace {
+
+constexpr double kMaxLoad = 0.6;
+constexpr size_t kMinCapacity = 1024;
+constexpr size_t kHistMax = 100000;
+
+// Per-thread, per-shard staging buffer: the shard mutex is taken once per 512 k-mers.
+// A Kmer is 32 bytes, so with the default 256 shards a whole thread stages 4 MiB.
+constexpr size_t kShardBuffer = 512;
+// T39 (build_v3): bound the staging area independently of -t. The shard count is
+// nextpow2(max(256, 8*T)) and every worker used to stage nShards*512 k-mers, so the total
+// grew as T^2 -- 16 MiB at T=4, 2 GiB at T=128, 8 GiB at T=256, 2 TiB at the CLI maximum
+// of 4096 -- and was allocated (and touched) before the memory guard could run. The shard
+// count is capped and each worker's staging held at the 256-shard size, 4 MiB. For T <= 32
+// both values are unchanged; above that only the flush granularity and the order of
+// insertion into the shard tables change, which the counts do not depend on.
+constexpr size_t kMaxShards = 1024;
+constexpr size_t kStagingKmers = 256 * kShardBuffer;
+
+void rehashTable(std::vector<Kmer>& keys, std::vector<uint32_t>& counts, size_t& mask,
+                 size_t newCapacity) {
+    std::vector<Kmer> nk(newCapacity);
+    std::vector<uint32_t> nc(newCapacity, 0);
+    const size_t nmask = newCapacity - 1;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        if (counts[i] == 0) continue;
+        size_t j = kmerHash(keys[i]) & nmask;
+        while (nc[j] != 0) j = (j + 1) & nmask;
+        nk[j] = keys[i];
+        nc[j] = counts[i];
+    }
+    keys.swap(nk);
+    counts.swap(nc);
+    mask = nmask;
+}
+
+size_t capacityFor(size_t expectedEntries) {
+    size_t cap = kMinCapacity;
+    if (expectedEntries) {
+        const double target = static_cast<double>(expectedEntries) / kMaxLoad;
+        while (static_cast<double>(cap) < target && cap <= (~static_cast<size_t>(0) >> 1)) cap <<= 1;
+    }
+    return cap;
+}
+
+}  // namespace
+
+void KmerTable::reserve(size_t expectedEntries) {
+    const size_t cap = capacityFor(expectedEntries);
+    if (cap <= capacity()) return;
+    rehashTable(keys_, counts_, mask_, cap);
+}
+
+void KmerTable::growIfNeeded() {
+    const size_t cap = capacity();
+    if (cap == 0) return;
+    if (size_ * 5 > cap * 3) rehashTable(keys_, counts_, mask_, cap * 2);
+}
+
+void KmerTable::put(Kmer key, uint32_t count) {
+    if (count == 0) {
+        erase(key);
+        return;
+    }
+    if (capacity() == 0) rehashTable(keys_, counts_, mask_, kMinCapacity);
+    size_t i = kmerHash(key) & mask_;
+    while (counts_[i] != 0) {
+        if (keys_[i] == key) {
+            counts_[i] = count;
+            return;
+        }
+        i = (i + 1) & mask_;
+    }
+    keys_[i] = key;
+    counts_[i] = count;
+    ++size_;
+    growIfNeeded();
+}
+
+void KmerTable::erase(Kmer key) {
+    if (capacity() == 0) return;
+    size_t hole = kmerHash(key) & mask_;
+    while (true) {
+        if (counts_[hole] == 0) return;
+        if (keys_[hole] == key) break;
+        hole = (hole + 1) & mask_;
+    }
+    // Backward shift: pull every following entry of the same probe run back into
+    // the hole if the hole sits inside its [ideal, current] window. The load
+    // factor guarantees an empty slot terminates the walk.
+    size_t j = hole;
+    for (;;) {
+        j = (j + 1) & mask_;
+        if (counts_[j] == 0) break;
+        const size_t ideal = kmerHash(keys_[j]) & mask_;
+        if (((j - hole) & mask_) <= ((j - ideal) & mask_)) {
+            keys_[hole] = keys_[j];
+            counts_[hole] = counts_[j];
+            hole = j;
+        }
+    }
+    counts_[hole] = 0;
+    keys_[hole] = 0;
+    --size_;
+}
+
+void KmerTable::clear() {
+    std::fill(counts_.begin(), counts_.end(), 0u);
+    size_ = 0;
+}
+
+struct KmerCounter::Shard {
+    KmerTable table;
+    std::mutex mu;
+};
+
+KmerCounter::~KmerCounter() = default;
+
+KmerCounter::KmerCounter(int k, int threads) : k_(k), threads_(threads > 0 ? threads : 1) {
+    size_t target = std::max<size_t>(256, static_cast<size_t>(8) * static_cast<size_t>(threads_));
+    if (target > kMaxShards) target = kMaxShards;
+    size_t nShards = 1;
+    while (nShards < target) nShards <<= 1;
+    shards_.resize(nShards);
+    for (size_t i = 0; i < nShards; ++i) {
+        shards_[i].reset(new Shard());
+        shards_[i]->table.reserve(4096);
+    }
+}
+
+void KmerCounter::count(const SequenceStore& store, const std::vector<std::string>& extraSeqs,
+                        uint32_t extraWeight) {
+    if (shards_.empty()) return;
+    const size_t nShards = shards_.size();
+    const size_t shardMask = nShards - 1;
+    const size_t perShard = std::max<size_t>(1, std::min(kShardBuffer, kStagingKmers / nShards));
+    const size_t nReads = store.size();
+    const int k = k_;
+
+    // Blocks amortise the atomic hand-out; reads inside a block are contiguous
+    // so the packed sequence buffer is walked linearly.
+    constexpr size_t kBlock = 1024;
+    const size_t nBlocks = (nReads + kBlock - 1) / kBlock;
+    std::atomic<size_t> nextBlock{0};
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> nextExtra{0};
+    std::atomic<uint64_t> totalKmers{0};
+
+    size_t nThreads = static_cast<size_t>(threads_);
+    if (nThreads > nBlocks + extraSeqs.size()) nThreads = std::max<size_t>(1, nBlocks + extraSeqs.size());
+
+    auto worker = [&]() {
+        std::vector<Kmer> buf(nShards * perShard);
+        std::vector<uint32_t> fill(nShards, 0);
+        uint64_t local = 0;
+        uint32_t weight = 1;
+
+        auto flushShard = [&](size_t s) {
+            const uint32_t n = fill[s];
+            if (n == 0) return;
+            const Kmer* p = &buf[s * perShard];
+            Shard& shard = *shards_[s];
+            std::lock_guard<std::mutex> lock(shard.mu);
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint64_t c = static_cast<uint64_t>(shard.table.get(p[i])) + weight;
+                shard.table.put(p[i], c > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(c));
+            }
+            fill[s] = 0;
+        };
+
+        // Shard selection uses high hash bits; the tables index with low bits.
+        auto push = [&](Kmer key) {
+            const size_t s = static_cast<size_t>(kmerHash(key) >> 40) & shardMask;
+            buf[s * perShard + fill[s]] = key;
+            if (++fill[s] == perShard) flushShard(s);
+            local += weight;
+        };
+
+        for (;;) {
+            const size_t b = nextBlock.fetch_add(1, std::memory_order_relaxed);
+            if (b >= nBlocks) break;
+            // Checked once per block rather than per k-mer: reading /proc is a
+            // syscall, and a block is large enough that overshoot is bounded.
+            if (memoryLimit_ > 0 && !stop.load(std::memory_order_relaxed)) {
+                const long long rss = util::currentMemoryBytes();
+                if (rss > 0 && rss > memoryLimit_) stop.store(true, std::memory_order_relaxed);
+            }
+            if (stop.load(std::memory_order_relaxed)) break;
+            const size_t begin = b * kBlock;
+            const size_t end = std::min(nReads, begin + kBlock);
+            for (size_t r = begin; r < end; ++r) {
+                forEachKmer(store, r, k, [&](Kmer km, uint32_t) { push(km); });
+            }
+        }
+        for (size_t s = 0; s < nShards; ++s) flushShard(s);
+        if (stop.load(std::memory_order_relaxed)) return;
+
+        // Contigs carried over from a smaller k are trusted evidence, so each of
+        // their k-mers is worth `extraWeight` observations.
+        weight = extraWeight;
+        if (extraWeight > 0) {
+            for (;;) {
+                const size_t i = nextExtra.fetch_add(1, std::memory_order_relaxed);
+                if (i >= extraSeqs.size()) break;
+                const std::string& s = extraSeqs[i];
+                Kmer fwd = 0, rc = 0;
+                int valid = 0;
+                for (size_t p = 0; p < s.size(); ++p) {
+                    const int c = baseCode(s[p]);
+                    if (c < 0) {
+                        valid = 0;
+                        fwd = 0;
+                        rc = 0;
+                        continue;
+                    }
+                    fwd = pushBack(fwd, c, k);
+                    rc = pushFrontRc(rc, c, k);
+                    if (++valid >= k) push(fwd < rc ? fwd : rc);
+                }
+            }
+            for (size_t s = 0; s < nShards; ++s) flushShard(s);
+        }
+
+        totalKmers.fetch_add(local, std::memory_order_relaxed);
+    };
+
+    if (nThreads <= 1) {
+        worker();
+        if (stop.load(std::memory_order_relaxed)) exceeded_ = true;
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nThreads);
+        for (size_t t = 0; t < nThreads; ++t) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+        if (stop.load(std::memory_order_relaxed)) exceeded_ = true;
+    }
+
+    uint64_t distinct = 0;
+    for (const auto& s : shards_) distinct += s->table.size();
+    stats_.totalKmers = totalKmers.load(std::memory_order_relaxed);
+    stats_.distinctKmers = distinct;
+}
+
+uint32_t KmerCounter::chooseCutoff(const std::vector<uint64_t>& histogram, double& peakOut,
+                                   double* errorThresholdOut) {
+    peakOut = 0;
+    const size_t n = histogram.size();
+    if (n <= 3) return 2;
+
+    // Weighting by c picks the coverage mode rather than the error shoulder,
+    // which always dominates by raw distinct-k-mer count.
+    //
+    // Index kHistMax is a saturation bucket holding every k-mer at or above the
+    // limit, so it is a floor rather than an observed count. Weighting it by
+    // that index credits it with a mass it never had, and at small k -- where
+    // collapsed repeats and low-complexity sequence pile up there -- it
+    // outweighs the real coverage mode. That put the peak at the limit itself
+    // and dragged the valley search across the whole range, yielding absurd
+    // cutoffs that emptied the solid set.
+    //
+    // Keyed off kHistMax rather than the argument's length so a caller passing
+    // a histogram already truncated to its used range does not lose a genuine
+    // top bin.
+    const size_t last = std::min(n, kHistMax);
+    size_t peak = 0;
+    unsigned __int128 best = 0;
+    for (size_t c = 3; c < last; ++c) {
+        const unsigned __int128 v = static_cast<unsigned __int128>(histogram[c]) * c;
+        if (v > best) {
+            best = v;
+            peak = c;
+        }
+    }
+    // The weighted argmax can still land inside the error shoulder. On a very deep
+    // library the shoulder holds tens of millions of distinct k-mers, and if the genome
+    // mode is broad enough that no single bin dominates, `histogram[c]*c` peaks at c=6
+    // while the graph's real median coverage is 70-160x. Measured on 6 of 666 Klebsiella
+    // isolates, all sequenced to 250-449x: every one reported peak=6 and retained 25-43
+    // MILLION solid k-mers for a ~5.7 Mb genome. The cutoff then stayed at 2 and the graph
+    // drowned -- one strain assembled 3.96 Mb of a 5.75 Mb genome into 4,405 contigs.
+    //
+    // The shoulder and the genome mode differ in SHAPE, not just position: inside the
+    // shoulder the histogram is still falling steeply, whereas at a genuine coverage mode
+    // it is flat or rising. So walk up while the decline stays steep. This needs no genome
+    // size and no second pass -- it is the same information the search already has.
+    if (peak > 0 && peak < last) {
+        size_t c = peak;
+        size_t guard = 0;
+        while (c + 1 < last && guard++ < kHistMax) {
+            const uint64_t here = histogram[c], next = histogram[c + 1];
+            if (next == 0 || here < next) break;              // flat or rising: a real mode
+            if (here < next + next / 4) break;                // decline shallower than 25%
+            ++c;
+        }
+        if (c > peak) {
+            // Re-run the weighted argmax above the shoulder we just walked out of.
+            unsigned __int128 b2 = 0;
+            size_t p2 = 0;
+            for (size_t d = c; d < last; ++d) {
+                const unsigned __int128 v = static_cast<unsigned __int128>(histogram[d]) * d;
+                if (v > b2) { b2 = v; p2 = d; }
+            }
+            if (p2 > peak) peak = p2;
+        }
+    }
+
+    peakOut = static_cast<double>(peak);
+    if (errorThresholdOut) *errorThresholdOut = 0;
+    if (peak < 5) return 2;
+
+    size_t valley = 1;
+    uint64_t lowest = ~static_cast<uint64_t>(0);
+    for (size_t c = 1; c < peak; ++c) {
+        if (histogram[c] < lowest) {
+            lowest = histogram[c];
+            valley = c;
+        }
+    }
+
+    // Cutting at the valley was costing far more than it saved.
+    //
+    // The valley is where the error shoulder meets the coverage distribution
+    // -- but on a real bacterial genome the counts between them are not empty,
+    // they hold the genuinely low-coverage sequence: AT-rich prophages and
+    // genomic islands, low-copy plasmids, the k-mers either side of a repeat.
+    // Diffing TesserACT against SPAdes on the closed-reference panel, every large
+    // region SPAdes recovered and TesserACT did not was AT-rich (GC 29-42%
+    // against a 57% genome), and the whole difference was this threshold.
+    //
+    // Measured on one such isolate, cutting at the valley (5) against a flat 2:
+    //
+    //     cutoff  NGA50     genome fraction  misassemblies  contigs
+    //     5        39,855   97.43%           1              328
+    //     3        86,779   98.15%           0              195
+    //     2       132,059   98.41%           1              157
+    //
+    // for reference SPAdes on the same reads: 81,707 / 98.58% / 3 / 188.
+    //
+    // The error k-mers a low cutoff lets through do not survive anyway: they
+    // enter the graph as tips, bubbles and erroneous connections, which is what
+    // simplify() exists to remove, and it removes them by topology -- evidence
+    // a count threshold does not have. So be permissive here and strict there.
+    //
+    // The scaling keeps a floor of 2 up to ~125x and rises slowly beyond it, on
+    // the reasoning that error k-mers reach a given count more often as depth
+    // grows. The panel spans 41-89x, so anything above that is extrapolation
+    // and is deliberately gentle; the valley still caps the result, so a
+    // library whose error shoulder really does run long is still respected.
+    // The error threshold for SIMPLIFICATION, which is a different question from the
+    // abundance cutoff above. The cutoff is deliberately permissive because errors are
+    // meant to die by topology; but the topology rules then need to know where error-level
+    // coverage actually sits, and a fixed multiple of the mean cannot know that.
+    //
+    // SPAdes fits a mixture and clamps the result to the midpoint between the valley and
+    // the coverage mean (kmer_coverage_model.cpp:358-363). The clamp is the robust part --
+    // it is what keeps the number small at high k, where the distribution is thin -- so
+    // that is what is taken here, floored at the valley itself.
+    if (errorThresholdOut) {
+        double t = static_cast<double>(valley) +
+                   (static_cast<double>(peak) - static_cast<double>(valley)) * 0.5;
+        if (t < static_cast<double>(valley)) t = static_cast<double>(valley);
+        *errorThresholdOut = t;
+    }
+
+    const uint32_t permissive =
+        std::max<uint32_t>(2, static_cast<uint32_t>((peak + 25) / 50));
+    uint32_t cutoff = std::min<uint32_t>(permissive, static_cast<uint32_t>(valley));
+    if (cutoff < 2) cutoff = 2;
+    return cutoff;
+}
+
+size_t KmerCounter::addTrusted(const std::vector<std::string>& seqs, KmerTable& out,
+                               uint32_t floorCount) const {
+    const int k = k_;
+    if (k <= 0 || floorCount == 0) return 0;
+    size_t added = 0;
+    for (const std::string& seq : seqs) {
+        Kmer fwd = 0, rc = 0;
+        int valid = 0;
+        for (size_t p = 0; p < seq.size(); ++p) {
+            const int c = baseCode(seq[p]);
+            if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+            fwd = pushBack(fwd, c, k);
+            rc = pushFrontRc(rc, c, k);
+            if (++valid < k) continue;
+            const Kmer key = fwd < rc ? fwd : rc;
+            // Never lower a measured count: a k-mer the reads saw keeps the depth they
+            // gave it, which is what the coverage model and every simplification rule
+            // downstream are entitled to read.
+            if (out.get(key) == 0) { out.put(key, floorCount); ++added; }
+        }
+    }
+    return added;
+}
+
+void KmerCounter::extractSolid(uint32_t forcedCutoff, KmerTable& out) {
+    std::vector<uint64_t> hist(kHistMax + 1, 0);
+    const size_t nShards = shards_.size();
+
+    if (nShards) {
+        std::atomic<size_t> nextShard{0};
+        std::mutex mergeMu;
+        size_t nThreads = std::min<size_t>(static_cast<size_t>(threads_), nShards);
+        if (nThreads < 1) nThreads = 1;
+        auto worker = [&]() {
+            std::vector<uint64_t> localHist(kHistMax + 1, 0);
+            for (;;) {
+                const size_t s = nextShard.fetch_add(1, std::memory_order_relaxed);
+                if (s >= nShards) break;
+                shards_[s]->table.forEach([&](Kmer, uint32_t c) {
+                    localHist[c < kHistMax ? c : kHistMax] += 1;
+                });
+            }
+            std::lock_guard<std::mutex> lock(mergeMu);
+            for (size_t i = 0; i <= kHistMax; ++i) hist[i] += localHist[i];
+        };
+        if (nThreads <= 1) {
+            worker();
+        } else {
+            std::vector<std::thread> pool;
+            pool.reserve(nThreads);
+            for (size_t t = 0; t < nThreads; ++t) pool.emplace_back(worker);
+            for (auto& th : pool) th.join();
+        }
+    }
+
+    double peak = 0;
+    double fittedErr = 0;
+    const uint32_t autoCutoff = chooseCutoff(hist, peak, &fittedErr);
+    stats_.errorThreshold = fittedErr;
+    const uint32_t cutoff = forcedCutoff ? forcedCutoff : autoCutoff;
+
+    uint64_t solid = 0;
+    for (size_t c = cutoff; c <= kHistMax; ++c) solid += hist[c];
+
+    out.clear();
+    out.reserve(solid);
+    for (size_t s = 0; s < nShards; ++s) {
+        shards_[s]->table.forEach([&](Kmer key, uint32_t c) {
+            if (c >= cutoff) out.put(key, c);
+        });
+        // Released one shard at a time: the compact table and the sharded ones
+        // are never both fully resident.
+        shards_[s].reset();
+    }
+    shards_.clear();
+    shards_.shrink_to_fit();
+
+    size_t used = kHistMax + 1;
+    while (used > 0 && hist[used - 1] == 0) --used;
+    hist.resize(used);
+    hist.shrink_to_fit();
+
+    stats_.histogram = std::move(hist);
+    stats_.solidKmers = solid;
+    stats_.cutoff = cutoff;
+    stats_.peakCoverage = peak;
+    stats_.estimatedGenomeSize = static_cast<double>(solid);
+}
+
+}  // namespace ts

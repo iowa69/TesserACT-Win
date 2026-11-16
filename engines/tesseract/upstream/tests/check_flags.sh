@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Every flag the help text and README advertise must exist, parse, and take
+# effect. A flag that is documented but silently ignored is worse than one that
+# is missing, because nothing fails.
+set -uo pipefail
+# Release defaults: an exported TESSERACT_* experiment environment must neither fail nor
+# mask these checks.
+while IFS= read -r v; do unset "$v"; done < <(compgen -e | grep '^TESSERACT_' || true)
+BIN=${1:-./tesseract-asm}
+MODELBIN=${2:-./tesseract-model}
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+pass=0; fail=0
+
+ok()   { printf "  ok    %s\n" "$1"; pass=$((pass+1)); }
+bad()  { printf "  FAIL  %s -- %s\n" "$1" "$2"; fail=$((fail+1)); }
+
+# --- a tiny but real dataset ------------------------------------------------
+python3 - "$TMP" <<'PY'
+import random, sys, gzip, os
+random.seed(7)
+d = sys.argv[1]
+g = "".join(random.choice("ACGT") for _ in range(60000))
+rep = "".join(random.choice("ACGT") for _ in range(800))
+g = g[:20000] + rep + g[20000:40000] + rep + g[40000:]
+open(os.path.join(d, "ref.fa"), "w").write(">ref\n" + g + "\n")
+def rc(s): return s[::-1].translate(str.maketrans("ACGT", "TGCA"))
+r1, r2 = [], []
+for i in range(12000):
+    p = random.randint(0, len(g) - 400)
+    frag = g[p:p + random.randint(280, 360)]
+    r1.append(frag[:150]); r2.append(rc(frag[-150:]))
+for name, rs in (("R1", r1), ("R2", r2)):
+    with gzip.open(os.path.join(d, f"{name}.fq.gz"), "wt") as fh:
+        for i, s in enumerate(rs):
+            fh.write(f"@r{i}\n{s}\n+\n{'I'*len(s)}\n")
+PY
+
+R1="$TMP/R1.fq.gz"; R2="$TMP/R2.fq.gz"
+
+run () {   # run OUTDIR extra-args...
+  local out="$1"; shift
+  "$BIN" -1 "$R1" -2 "$R2" -o "$out" -t 4 "$@" > "$out.log" 2>&1
+}
+
+# --- 1. flags parse and the run succeeds ------------------------------------
+for spec in \
+  "--mode fast" "--mode standard" "--mode careful" "--mode aggressive" \
+  "--aggressive" "--no-correct" "--no-resolve" "--no-scaffold" "--no-polish" \
+  "--min-contig 500" "-k 21,33" "-k 21,55,127" "-c 2" "--min-link 3" "--tie-ratio 1.3" \
+  "--quiet" "--map-polish none"
+do
+  d="$TMP/f$(echo "$spec" | tr -d ' /,.-')"
+  mkdir -p "$d"
+  if run "$d" $spec && [ -s "$d/contigs.fasta" ]; then ok "$spec"; else bad "$spec" "run failed"; fi
+done
+
+# --- 2. flags that must be rejected ----------------------------------------
+for spec in "-k 4" "-k 200" "--mode nonsense" "--map-polish nonsense" "--nosuchflag" \
+            "--tie-ratio 0" "--min-link -5" "-t 0" "--simplify-rounds 0" \
+            "--polish-passes -1" "--qtrim-quality 99" "--tie-ratio abc"; do
+  d="$TMP/r$(echo "$spec" | tr -d ' /,.-')"; mkdir -p "$d"
+  if run "$d" $spec; then bad "reject $spec" "accepted an invalid value"; else ok "reject $spec"; fi
+done
+
+# --- 2b. malformed TESSERACT_* values must be rejected ----------------------
+# 1.3.0 read these with atoi/atof and ran: 1e9 became 1 (the guard silently off), true
+# became 0, -1 wrapped to SIZE_MAX, 4294967296 was undefined. Now: exit 2, flag named.
+for e in "TESSERACT_MIN_FALLBACK_DEST=1e9" "TESSERACT_MIN_FALLBACK_DEST=abc" \
+         "TESSERACT_MIN_FALLBACK_DEST=4294967296" "TESSERACT_MIN_FALLBACK_DEST=-1" \
+         "TESSERACT_GAPCLOSE_VOTES=-1" "TESSERACT_JOIN_TRACE=true" "TESSERACT_RC_DOVETAIL=true" \
+         "TESSERACT_ROUTE_DISTANCE=2" "TESSERACT_COMMON_PREFIX=inf" "TESSERACT_JOIN_TRACE="; do
+  d="$TMP/e$(printf '%s' "$e" | tr -c 'A-Za-z0-9' '_')"; mkdir -p "$d"
+  env "$e" "$BIN" -1 "$R1" -2 "$R2" -o "$d" -t 4 > "$d.log" 2>&1; rc=$?
+  if [ "$rc" -ne 2 ]; then bad "reject env $e" "exit $rc, expected 2"
+  elif grep -q "^error: ${e%%=*}='" "$d.log"; then ok "reject env $e"
+  else bad "reject env $e" "exit 2 without naming the flag"; fi
+done
+# ...and a valid configuration (the K2 arm) is accepted and recorded with parsed values.
+# 1.4.0: FIXES, PREFIX_MIN_BODY and DROPOUT_BRIDGE are on by default, so the K2 arm now also
+# names their 1.3.0 values (RELEASE_PLAN 1.4.0 step 4d).
+mkdir -p "$TMP/k2env"
+if env TESSERACT_COMMON_PREFIX=0 TESSERACT_MIN_FALLBACK_DEST=1000000000 \
+       TESSERACT_REQUIRE_SUPPORT_SINGLE=1 TESSERACT_EXCLUDE_SHARED_REPEAT_SUPPORT=1 \
+       TESSERACT_FIXES=0 TESSERACT_PREFIX_MIN_BODY=0 TESSERACT_DROPOUT_BRIDGE=0 \
+       "$BIN" -1 "$R1" -2 "$R2" -o "$TMP/k2env" -t 4 --tie-ratio 2.0 > "$TMP/k2env.log" 2>&1 \
+   && [ -s "$TMP/k2env/contigs.fasta" ] \
+   && grep -qx "\[config\] TESSERACT_MIN_FALLBACK_DEST=1000000000" "$TMP/k2env.log" \
+   && grep -qx "\[config\] TESSERACT_REQUIRE_SUPPORT_SINGLE=1 (on)" "$TMP/k2env.log"; then
+  ok "valid env accepted and logged as [config]"
+else
+  bad "valid env" "run failed or [config] lines missing"
+fi
+
+# --- 3. flags must actually take effect ------------------------------------
+mkdir -p "$TMP/base" "$TMP/minc"
+run "$TMP/base"; run "$TMP/minc" --min-contig 100000
+a=$(grep -c '^>' "$TMP/base/contigs.fasta" 2>/dev/null); a=${a:-0}
+b=$(grep -c '^>' "$TMP/minc/contigs.fasta" 2>/dev/null); b=${b:-0}
+[ "$b" -lt "$a" ] && ok "--min-contig changes output ($a -> $b)" || bad "--min-contig" "no effect ($a -> $b)"
+
+[ -s "$TMP/base/assembly_graph.gfa" ] && ok "GFA written by default" || bad "GFA" "missing"
+[ -s "$TMP/base/report.html" ] && ok "HTML report written" || bad "report.html" "missing"
+[ -s "$TMP/base/report.json" ] && ok "JSON report written" || bad "report.json" "missing"
+
+# Every reproducible output, not only contigs.fasta (presence and bytes).
+differs() {
+  local f d=""
+  for f in contigs.fasta scaffolds.fasta scaffolds.agp assembly_graph.gfa; do
+    if [ -e "$1/$f" ] || [ -e "$2/$f" ]; then cmp -s "$1/$f" "$2/$f" || d="$d $f"; fi
+  done
+  printf '%s' "$d"
+}
+
+# determinism
+mkdir -p "$TMP/d1" "$TMP/d2"
+run "$TMP/d1"; run "$TMP/d2"
+dd=$(differs "$TMP/d1" "$TMP/d2")
+[ -s "$TMP/d1/contigs.fasta" ] && [ -z "$dd" ] \
+  && ok "deterministic across runs" || bad "determinism" "outputs differ:$dd"
+
+# thread invariance
+mkdir -p "$TMP/t1" "$TMP/t8"
+"$BIN" -1 "$R1" -2 "$R2" -o "$TMP/t1" -t 1 >/dev/null 2>&1
+"$BIN" -1 "$R1" -2 "$R2" -o "$TMP/t8" -t 8 >/dev/null 2>&1
+td=$(differs "$TMP/t1" "$TMP/t8")
+[ -s "$TMP/t1/contigs.fasta" ] && [ -z "$td" ] \
+  && ok "thread-invariant" || bad "thread invariance" "outputs differ:$td"
+
+# --- 4. the model path ------------------------------------------------------
+if [ -x "$MODELBIN" ]; then
+  mkdir -p "$TMP/mdl"
+  cp "$TMP/ref.fa" "$TMP/mdl/A_chr.fasta"
+  python3 - "$TMP" <<'PY'
+import random, sys, os
+random.seed(11)
+d = sys.argv[1]
+g = open(os.path.join(d, "ref.fa")).read().split("\n", 1)[1].replace("\n", "")
+for n in "BCDEFGHIJ":
+    s = list(g)
+    for _ in range(len(g) // 200):        # a few percent divergence
+        i = random.randrange(len(s)); s[i] = random.choice("ACGT")
+    open(os.path.join(d, "mdl", f"{n}_chr.fasta"), "w").write(f">{n}\n" + "".join(s) + "\n")
+PY
+  if "$MODELBIN" --organism test --out "$TMP/test.tsm" --min-support 2 "$TMP"/mdl/*.fasta \
+       > "$TMP/model.log" 2>&1 && [ -s "$TMP/test.tsm" ]; then
+    ok "tesseract-model builds a model"
+  else
+    bad "tesseract-model" "did not produce a model"
+  fi
+  if grep -q "excluded" "$TMP/model.log"; then ok "model reports exclusions"; else bad "model exclusions" "not reported"; fi
+
+  "$MODELBIN" --organism test --out "$TMP/excl.tsm" --exclude A --min-support 2 \
+      "$TMP"/mdl/*.fasta > "$TMP/excl.log" 2>&1
+  grep -q "1 accessions excluded" "$TMP/excl.log" \
+    && ok "--exclude is honoured and recorded" || bad "--exclude" "not recorded"
+
+  # --model is an author-only option since 1.3.0 (eb1933e): without TESSERACT_MODEL_AUTHOR it
+  # is refused at the argument. The checks below exercise the author path, so they set it --
+  # they used to pass only in a shell that happened to export it, and failed everywhere else.
+  mkdir -p "$TMP/noauthor"
+  if run "$TMP/noauthor" --organism test --model "$TMP/test.tsm"; then
+    bad "--model without TESSERACT_MODEL_AUTHOR" "accepted"
+  elif grep -q "is not a supported option" "$TMP/noauthor.log"; then
+    ok "--model is refused without TESSERACT_MODEL_AUTHOR"
+  else
+    bad "--model without TESSERACT_MODEL_AUTHOR" "failed without the documented message"
+  fi
+  export TESSERACT_MODEL_AUTHOR=1
+
+  mkdir -p "$TMP/withmodel"
+  if run "$TMP/withmodel" --organism test --model "$TMP/test.tsm" \
+     && grep -q "model joining" "$TMP/withmodel.log"; then
+    ok "--model runs the model stage"
+  else
+    bad "--model" "stage did not run"
+  fi
+
+  # A model the user named and TesserACT cannot read is fatal rather than a
+  # warning: an assembly built without the model differs from one built with it
+  # in exactly the junctions the model exists to settle, so carrying on would
+  # return a different result under the same command line.
+  mkdir -p "$TMP/badmodel"
+  if run "$TMP/badmodel" --model "$TMP/does-not-exist.tsm"; then
+    bad "missing model" "should have failed, not assembled without the model"
+  elif grep -qiE "cannot open (--model file|model file)" "$TMP/badmodel.log"; then
+    ok "an unreadable --model is a fatal error"
+  else
+    bad "missing model" "failed without saying the model could not be read"
+  fi
+
+  # IS panel
+  head -2 "$TMP/ref.fa" > "$TMP/is.fna"
+  mkdir -p "$TMP/withis"
+  if run "$TMP/withis" --organism test --model "$TMP/test.tsm" --is-panel "$TMP/is.fna" \
+     && grep -q "insertion-sequence panel" "$TMP/withis.log"; then
+    ok "--is-panel loads"
+  else
+    bad "--is-panel" "not loaded"
+  fi
+fi
+
+printf "\n%d passed, %d failed\n" "$pass" "$fail"
+[ "$fail" -eq 0 ]

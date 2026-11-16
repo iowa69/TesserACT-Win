@@ -1,0 +1,347 @@
+// Machine-readable run report. Written with a minimal serialiser rather than a
+// JSON library so the project keeps its zero-dependency build.
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#include "report.h"
+
+namespace ts {
+
+namespace {
+
+void esc(const std::string& in, std::string& out) {
+    for (char c : in) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+}
+
+struct Writer {
+    std::string s;
+    int indent = 0;
+
+    void pad() { s.append(static_cast<size_t>(indent) * 4, ' '); }
+    void key(const char* k) { pad(); s += '"'; s += k; s += "\": "; }
+
+    void str(const char* k, const std::string& v) {
+        key(k); s += '"'; esc(v, s); s += "\",\n";
+    }
+    void num(const char* k, double v) {
+        key(k);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.6g", v);
+        s += buf; s += ",\n";
+    }
+    void uint(const char* k, unsigned long long v) {
+        key(k); s += std::to_string(v); s += ",\n";
+    }
+    void boolean(const char* k, bool v) { key(k); s += v ? "true" : "false"; s += ",\n"; }
+
+    void openObj(const char* k) { key(k); s += "{\n"; ++indent; }
+    void openArr(const char* k) { key(k); s += "[\n"; ++indent; }
+    void close(char c) {
+        // Drop the trailing comma the members left behind.
+        if (s.size() >= 2 && s[s.size() - 2] == ',') s.erase(s.size() - 2, 1);
+        --indent;
+        pad();
+        s += c;
+        s += ",\n";
+    }
+
+    void arrOfStrings(const char* k, const std::vector<std::string>& v) {
+        key(k); s += '[';
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) s += ',';
+            s += '"';
+            esc(v[i], s);
+            s += '"';
+        }
+        s += "],\n";
+    }
+
+    template <typename T>
+    void arrOfNumbers(const char* k, const std::vector<T>& v, size_t cap = 0) {
+        key(k); s += '[';
+        const size_t n = (cap && v.size() > cap) ? cap : v.size();
+        for (size_t i = 0; i < n; ++i) {
+            if (i) s += ',';
+            s += std::to_string(v[i]);
+        }
+        s += "],\n";
+    }
+};
+
+}  // namespace
+
+bool writeJsonReport(const std::string& path, const AssemblyReport& rep, std::string& error) {
+    Writer w;
+    w.s += "{\n";
+    w.indent = 1;
+
+    w.str("tool", "TesserACT");
+    w.str("version", rep.version);
+    w.str("author", "Giovanni Lorenzin");
+    w.str("organisation", "IOWA-BioTech");
+    w.str("mode", rep.mode);
+    w.str("started_at", rep.startedAt);
+    w.str("command", rep.command);
+    w.uint("threads", static_cast<unsigned long long>(rep.threads));
+    w.num("total_seconds", rep.totalSeconds);
+    w.num("peak_memory_bytes", rep.peakMemoryBytes);
+
+    w.openObj("input");
+    w.uint("reads", rep.reads);
+    w.uint("bases", rep.inputBases);
+    w.uint("max_read_length", rep.maxReadLength);
+    w.uint("quality_trimmed_bases", rep.qualityTrimmedBases);
+    w.boolean("paired", rep.paired);
+    w.key("files"); w.s += "[";
+    for (size_t i = 0; i < rep.inputFiles.size(); ++i) {
+        if (i) w.s += ',';
+        w.s += '"'; esc(rep.inputFiles[i], w.s); w.s += '"';
+    }
+    w.s += "],\n";
+    w.close('}');
+
+    w.openObj("error_correction");
+    w.boolean("run", rep.correctionRun);
+    w.uint("k", static_cast<unsigned long long>(rep.correctionK));
+    w.uint("reads_examined", rep.correction.readsExamined);
+    w.uint("reads_corrected", rep.correction.readsCorrected);
+    w.uint("bases_corrected", rep.correction.basesCorrected);
+    w.uint("reads_without_anchor", rep.correction.readsUncorrectable);
+    w.uint("bases_masked", rep.correction.basesMasked);
+    w.num("seconds", rep.correctionSeconds);
+    w.close('}');
+
+    w.openArr("iterations");
+    for (const KIteration& it : rep.iterations) {
+        w.pad(); w.s += "{\n"; ++w.indent;
+        w.uint("k", static_cast<unsigned long long>(it.k));
+        w.uint("total_kmers", it.totalKmers);
+        w.uint("distinct_kmers", it.distinctKmers);
+        w.uint("solid_kmers", it.solidKmers);
+        w.uint("cutoff", it.cutoff);
+        w.num("peak_coverage", it.peakCoverage);
+        w.num("median_coverage", it.medianCoverage);
+        w.uint("carry_over_contigs", it.carryOverContigs);
+        w.uint("unitigs_built", it.unitigsBuilt);
+        w.uint("length_built", it.lengthBuilt);
+        w.uint("n50_built", it.n50Built);
+        w.uint("unitigs_final", it.unitigsFinal);
+        w.uint("length_final", it.lengthFinal);
+        w.uint("n50_final", it.n50Final);
+        w.num("count_seconds", it.countSeconds);
+        w.num("graph_seconds", it.graphSeconds);
+        w.num("simplify_seconds", it.simplifySeconds);
+        w.arrOfNumbers("count_histogram", it.countHistogram);
+        w.openArr("simplify_rounds");
+        for (const SimplifyRoundStats& r : it.rounds) {
+            w.pad(); w.s += "{";
+            w.s += "\"round\":" + std::to_string(r.round);
+            w.s += ",\"tips\":" + std::to_string(r.tipsRemoved);
+            w.s += ",\"bubbles\":" + std::to_string(r.bubblesPopped);
+            w.s += ",\"chimeras\":" + std::to_string(r.chimerasRemoved);
+            w.s += ",\"isolated\":" + std::to_string(r.isolatedRemoved);
+            w.s += ",\"merged\":" + std::to_string(r.merged);
+            w.s += ",\"unitigs\":" + std::to_string(r.unitigs);
+            w.s += ",\"n50\":" + std::to_string(r.n50);
+            w.s += ",\"total_length\":" + std::to_string(r.totalLength);
+            w.s += "},\n";
+        }
+        w.close(']');
+        w.close('}');
+    }
+    w.close(']');
+
+    w.openObj("repeat_resolution");
+    w.boolean("run", rep.resolveRun);
+    w.uint("reads_anchored", rep.resolve.readsMapped);
+    w.uint("linking_pairs", rep.resolve.pairsLinking);
+    w.uint("distinct_links", rep.resolve.distinctLinks);
+    w.uint("paths_built", rep.resolve.pathsBuilt);
+    w.uint("unitigs_joined", rep.resolve.unitigsJoined);
+    w.uint("scaffold_joins", rep.resolve.scaffoldJoins);
+    w.uint("gap_bases", rep.resolve.gapBases);
+    // build_v3 (T35 hand-off from G-resolve): the single-copy depth every repeat decision is
+    // taken against (theta), the repeat threshold derived from it and how theta was
+    // estimated. iterations[].median_coverage is the unweighted node median, a different
+    // number (the resolver has used the length-weighted median since 1.3.0).
+    w.num("resolver_theta", rep.resolve.theta);
+    w.num("repeat_threshold", rep.resolve.repeatThreshold);
+    w.str("theta_estimator", rep.resolve.thetaEstimator ? rep.resolve.thetaEstimator : "none");
+    w.num("legacy_unweighted_median", rep.resolve.legacyMedian);
+    w.uint("theta_population", rep.resolve.thetaPopulation);
+    w.num("seconds", rep.resolveSeconds);
+    w.openObj("insert_size");
+    w.boolean("usable", rep.resolve.insert.usable);
+    w.num("mean", rep.resolve.insert.mean);
+    w.num("stddev", rep.resolve.insert.stddev);
+    w.uint("observations", rep.resolve.insert.observations);
+    w.uint("min_plausible", static_cast<unsigned long long>(rep.resolve.insert.minPlausible));
+    w.uint("max_plausible", static_cast<unsigned long long>(rep.resolve.insert.maxPlausible));
+    w.close('}');
+    w.arrOfNumbers("insert_histogram", rep.insertHistogram, 2000);
+    w.close('}');
+
+    // Scaffold gap closing: what was attempted and why the rest stayed N. Until G-emit T17 this
+    // was only on the verbose stderr line, so a --quiet run kept no record of it.
+    w.openObj("gap_fill");
+    w.boolean("run", rep.gapFillRun);
+    w.uint("gaps_seen", rep.gapFill.gapsSeen);
+    w.uint("gaps_closed", rep.gapFill.gapsClosed);
+    w.uint("gaps_ambiguous", rep.gapFill.gapsAmbiguous);
+    w.uint("gaps_no_path", rep.gapFill.gapsNoPath);
+    w.uint("gaps_thin_pool", rep.gapFill.gapsThinPool);
+    w.uint("gaps_out_of_budget", rep.gapFill.gapsOutOfBudget);
+    w.uint("seed_below_floor", rep.gapFill.seedBelowFloor);
+    w.uint("target_below_floor", rep.gapFill.targetBelowFloor);
+    w.uint("reads_recruited", rep.gapFill.readsRecruited);
+    w.uint("n_bases_removed", rep.gapFill.nBasesRemoved);
+    w.uint("bases_inserted", rep.gapFill.basesInserted);
+    w.num("mean_local_depth", rep.gapFill.meanLocalDepth);
+    w.num("mean_floor", rep.gapFill.meanFloor);
+    w.uint("searches_truncated", rep.gapFill.gapsTruncated);
+    w.uint("truncated_accepted", rep.gapFill.gapsTruncatedAccepted);
+    w.uint("truncated_refused", rep.gapFill.gapsTruncatedRefused);
+    w.uint("searches_capped", rep.gapFill.gapsCapped);
+    w.uint("closed_after_backoff", rep.gapFill.closedAfterBackoff);
+    w.uint("backoff_trimmed_bases", rep.gapFill.trimmedBp);
+    w.num("seconds", rep.gapFill.seconds);
+    w.close('}');
+
+    w.openObj("organism_model");
+    w.boolean("run", rep.organismRun);
+    w.str("organism", rep.organismName);
+    w.uint("genomes", rep.organismGenomes);
+    w.uint("plasmid_sets", rep.organismPlasmids);
+    w.uint("markers_placed", rep.organism.markersFound);
+    w.uint("joins", rep.organism.joins);
+    w.uint("chromosome_joins", rep.organism.chromosomeJoins);
+    w.uint("plasmid_joins", rep.organism.plasmidJoins);
+    w.uint("insertion_site_joins", rep.organism.insertionSiteJoins);
+    w.uint("join_rounds", rep.organism.rounds);
+    w.uint("gap_bases", rep.organism.gapBases);
+    w.uint("contigs_in", rep.organism.contigsIn);
+    w.uint("contigs_out", rep.organism.contigsOut);
+    w.uint("rejected_weak", rep.organism.rejectedWeak);
+    w.uint("rejected_not_mutual", rep.organism.rejectedNotMutual);
+    w.uint("rejected_inconsistent", rep.organism.rejectedInconsistent);
+    w.uint("rejected_insertion_sequence", rep.organism.rejectedInsertionSeq);
+    // The accessions --exclude kept out of the panel, carried through the
+    // model file, so a leave-one-out run can be checked rather than trusted.
+    w.arrOfStrings("excluded_accessions", rep.organismExcluded);
+    w.close('}');
+
+    // Reported separately from the join stage on purpose. These contigs were ordered and
+    // oriented against a DIFFERENT genome; the sequence is this isolate's, the arrangement
+    // is an inference from the panel, and anything downstream that cares about the
+    // difference has to be able to see it. `track` names the panel chromosome used, so a
+    // result can be traced to the genome that shaped it.
+    w.openObj("layout");
+    w.boolean("run", rep.layout.run);
+    w.str("track", rep.layout.track);
+    w.uint("track_markers", rep.layout.trackMarkers);
+    w.uint("shared_markers", rep.layout.sharedMarkers);
+    w.uint("placed", rep.layout.placed);
+    w.uint("unplaced", rep.layout.unplaced);
+    w.uint("incoherent", rep.layout.incoherent);
+    w.uint("dropped", rep.layout.dropped);
+    w.uint("scaffolds", rep.layout.scaffolds);
+    w.uint("gap_bases", rep.layout.gapBases);
+    w.uint("overlap_merges", rep.layout.overlapMerges);
+    w.close('}');
+
+    w.openObj("polishing");
+    w.boolean("run", rep.polishRun);
+    w.uint("reads_used", rep.polish.readsUsed);
+    w.uint("bases_changed", rep.polish.basesChanged);
+    w.uint("positions_covered", rep.polish.positionsCovered);
+    w.uint("low_coverage_positions", rep.polish.lowCoveragePositions);
+    w.num("mean_depth", rep.polish.meanDepth);
+    w.num("seconds", rep.polishSeconds);
+    w.close('}');
+
+    // Organism Model 2.0 (C3): present only when an om2 flag ran (see AssemblyReport::om2Json).
+    if (!rep.om2Json.empty()) {
+        w.key("om2");
+        w.s += rep.om2Json;
+        w.s += ",\n";
+    }
+
+    // Phase 2 (EVAL_PLAN_P2 s5.2): the one "p2" block of every W1 feature, present on every
+    // assembler run (enabled=0 and zero counters when every TESSERACT_P2_* flag is off).
+    if (!rep.p2Json.empty()) {
+        w.key("p2");
+        w.s += rep.p2Json;
+        w.s += ",\n";
+    }
+
+    w.openObj("assembly");
+    w.uint("contigs", rep.contigs.size());
+    w.uint("total_length", rep.totalLength);
+    w.uint("largest", rep.largest);
+    w.uint("n50", rep.n50);
+    w.uint("n90", rep.n90);
+    w.uint("l50", rep.l50);
+    w.num("gc_percent", rep.gcPercent);
+    w.num("mean_coverage", rep.meanCoverage);
+    w.uint("gap_bases", rep.gapBases);
+    // The contig-level figures, so a script reading this never has to re-derive them by
+    // splitting the FASTA itself -- and never quotes the scaffold n50 by accident because it
+    // was the only one here. The keys above describe scaffolds whenever scaffold_gaps > 0.
+    // contig_* describe the records of contigs.fasta and scaffold_gaps counts N-runs of any
+    // length (schema change in the G-emit T17 fix; release 1.3.0 counted runs of 10+ N in the
+    // untrimmed scaffolds).
+    w.uint("scaffold_gaps", rep.scaffoldGaps);
+    w.uint("contig_count", rep.contigPieces);
+    w.uint("contig_total_length", rep.contigTotal);
+    w.uint("contig_largest", rep.contigLargest);
+    w.uint("contig_n50", rep.contigN50);
+    w.uint("trimmed_overlaps", rep.trimmedOverlaps);
+    w.uint("trimmed_overlap_bases", rep.trimmedOverlapBases);
+    w.uint("gfa_segments", rep.gfaSegments);
+    w.uint("gfa_links", rep.gfaLinks);
+    w.openArr("contig_table");
+    for (const ContigRecord& c : rep.contigs) {
+        w.pad(); w.s += "{";
+        w.s += "\"length\":" + std::to_string(c.length);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.4f", c.coverage);
+        w.s += ",\"coverage\":"; w.s += buf;
+        std::snprintf(buf, sizeof(buf), "%.2f", c.gcPercent);
+        w.s += ",\"gc\":"; w.s += buf;
+        w.s += ",\"gap_bases\":" + std::to_string(c.gapBases);
+        w.s += "},\n";
+    }
+    w.close(']');
+    w.close('}');
+
+    if (w.s.size() >= 2 && w.s[w.s.size() - 2] == ',') w.s.erase(w.s.size() - 2, 1);
+    w.s += "}\n";
+
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { error = "cannot write " + path; return false; }
+    // The final flush happens in fclose, so a disk that fills during it would
+    // otherwise be reported as a clean write. writeFasta already gets this right.
+    const bool ok = std::fwrite(w.s.data(), 1, w.s.size(), f) == w.s.size();
+    const bool closed = std::fclose(f) == 0;
+    if (!ok || !closed) { error = "write failed on " + path; return false; }
+    return true;
+}
+
+}  // namespace ts

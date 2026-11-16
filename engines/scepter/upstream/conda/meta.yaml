@@ -1,0 +1,56 @@
+{% set name = "scepter" %}
+{% set version = "1.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  git_url: https://github.com/iowa69/scepter.git
+  git_rev: v{{ version }}
+
+build:
+  number: 0
+  script:
+    - make -j${CPU_COUNT} CXX=${CXX}   # [unix]
+    - mkdir -p ${PREFIX}/bin           # [unix]
+    - cp scepter ${PREFIX}/bin/       # [unix]
+
+requirements:
+  build:
+    - {{ compiler('cxx') }}
+    - make
+  host:
+    - zlib
+  run:
+    - zlib
+
+test:
+  commands:
+    - scepter --version
+    - scepter --help
+    - scepter --help | grep -q -- --preset
+    - scepter --help | grep -q -- --dedup
+
+about:
+  home: https://github.com/iowa69/scepter
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+  summary: A fast FASTQ preprocessor - trimming, filtering, QC and contamination screening
+  description: |
+    scepter trims adapters and low-quality bases, filters reads, deduplicates,
+    corrects overlapping mates, screens for contamination and writes an HTML and
+    JSON report, in C++17 with no dependencies beyond a compiler and zlib.
+
+    It is a drop-in replacement for fastp's command line, with presets for the
+    common sequencer and application combinations. The `assembly` preset is
+    tuned for feeding a de novo assembler, which wants different settings from
+    variant calling: aggressive trimming costs an assembler more than the errors
+    it removes.
+  doc_url: https://github.com/iowa69/scepter#readme
+  dev_url: https://github.com/iowa69/scepter
+
+extra:
+  recipe-maintainers:
+    - iowa69

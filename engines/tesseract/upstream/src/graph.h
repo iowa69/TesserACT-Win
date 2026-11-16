@@ -1,0 +1,243 @@
+// The compacted (unitig) de Bruijn graph and its simplification operations.
+//
+// The graph is bidirected: a unitig is a double-stranded sequence with two
+// ends, and a link records which end of the neighbour it attaches to. Walking
+// out of end 1 of u into a link {v, 0} means continuing through v forward;
+// {v, 1} means continuing through v reverse-complemented. Every link is stored
+// on both sides, so `u.ends[eu]` containing {v, ev} implies `v.ends[ev]`
+// contains {u, eu}. Every operation below preserves that invariant.
+#pragma once
+
+#include <cstdint>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "counter.h"
+#include "graph_fix_flags.h"
+#include "kmer.h"
+
+namespace ts {
+
+struct Link {
+    uint32_t to = 0;
+    uint8_t toEnd = 0;
+    bool operator==(const Link& o) const { return to == o.to && toEnd == o.toEnd; }
+};
+
+struct Unitig {
+    std::string seq;
+    double coverage = 0;      // mean k-mer multiplicity along the unitig
+    bool deleted = false;
+    std::vector<Link> ends[2];   // ends[0] = 5' side, ends[1] = 3' side
+
+    size_t length() const { return seq.size(); }
+    size_t degree(int end) const { return ends[end].size(); }
+};
+
+std::string reverseComplement(const std::string& s);
+
+// What one pass of the simplification schedule changed, for the run report.
+struct SimplifyRoundStats {
+    int round = 0;
+    size_t tipsRemoved = 0;
+    size_t bubblesPopped = 0;
+    size_t chimerasRemoved = 0;
+    size_t isolatedRemoved = 0;
+    size_t lowDepthRemoved = 0;
+    size_t deadEndsJoined = 0;
+    size_t deadEnds = 0;
+    size_t merged = 0;
+    size_t unitigs = 0;
+    size_t n50 = 0;
+    size_t totalLength = 0;
+};
+
+class UnitigGraph {
+public:
+    UnitigGraph() = default;
+
+    // Builds the compacted graph from the solid k-mer set.
+    static UnitigGraph build(const KmerTable& solid, int k, int threads);
+
+    int k() const { return k_; }
+    void setK(int k) { k_ = k; }
+
+    std::vector<Unitig> nodes;
+
+    // ---- structural maintenance ----
+    // Merges maximal non-branching chains into single unitigs.
+    size_t compact();
+    // Physically drops deleted nodes and renumbers links.
+    void removeDeleted();
+    // Drops a node and unlinks it from its neighbours.
+    void deleteNode(uint32_t u);
+    // Verifies the bidirected invariant; returns a description of the first
+    // violation found, or an empty string. Used by the test suite.
+    std::string validate() const;
+
+    // ---- simplification ----
+    // Removes short dead-end branches whose coverage is low relative to the
+    // alternative at the branch point.
+    // Two rules, as SPAdes has. The relative one asks whether the junction offers a
+    // better alternative; the absolute one asks only whether the tip is short and thin.
+    //
+    // TesserACT shipped only the relative rule, at a 3.5x length coefficient. SPAdes runs
+    // both, and its second branch reaches 10x with no competitor requirement at all
+    // (tip_clipper.hpp, condition "{ tc_lb 10., cb auto }"). A tip 250-850 bp long sitting
+    // at 2-7x beside a competitor at 3x fails the relative test and survives forever, and
+    // every survivor is a junction that blocks compaction -- which is to say, a contig
+    // break. Pass absLen = 0 to get the old single-rule behaviour.
+    size_t removeTips(size_t maxLen, double covRatio, size_t absLen = 0,
+                      double absCovBound = 0.0);
+    // Collapses pairs of near-identical parallel paths, keeping the better
+    // supported one. `maxLoserCoverage` bounds how well covered the discarded
+    // side may be: an error bubble has a clearly weak side, whereas two
+    // genuinely diverged repeat copies carry comparable depth and collapsing
+    // them would fuse distinct loci into one misassembled contig.
+    size_t popBubbles(size_t maxLen, double minIdentity, double maxLoserCoverage = 0);
+    // Drops low-coverage unitigs that connect otherwise well-supported regions
+    // (the classic erroneous-connection pattern).
+    size_t removeErroneousConnections(double covThreshold, size_t maxLen);
+    // Drops isolated short low-coverage fragments.
+    size_t removeIsolated(double covThreshold, size_t maxLen);
+
+    // How many of a unitig's two ends lead nowhere.
+    int deadEnds(uint32_t u) const;
+    // Net change in the graph's dead-end count if `u` were deleted: removing a
+    // unitig closes its own loose ends but strands any neighbour that was
+    // attached only through it. Negative means deleting tidies the graph.
+    int deadEndChangeIfDeleted(uint32_t u) const;
+    size_t totalDeadEnds() const;
+
+    // Connected components, as lists of live unitig ids.
+    std::vector<std::vector<uint32_t>> components() const;
+
+    // Length-weighted median coverage of the longest `topN` unitigs in `ids`.
+    // Anchoring on the longest rather than on every unitig is what stops a
+    // swarm of short low-depth fragments from dragging the estimate down.
+    double weightedMedianCoverage(const std::vector<uint32_t>& ids, size_t topN = 10) const;
+
+    // Removes unitigs whose coverage falls below `fraction` of the local
+    // median, judged both against the whole graph and against their own
+    // connected component -- a low-copy plasmid is well below the global
+    // median without being spurious, and only the component-relative test
+    // tells the two apart. A unitig is kept regardless if deleting it would
+    // strand its neighbours.
+    size_t filterByReadDepth(double fraction);
+
+    // Removes unitigs far weaker than the sequence they sit among.
+    //
+    // The abundance cutoff is chosen once, from the whole k-mer histogram, and
+    // it cannot serve every replicon at once: a small multicopy plasmid carried
+    // at twenty times the genome's median produces its own sequencing errors at
+    // several-fold coverage, comfortably above a cutoff set for a 40x
+    // chromosome. Those error k-mers become real unitigs and shatter the
+    // plasmid -- one 2.5 kb replicon at 845x came out as fifty-seven tangled
+    // pieces. Judged against its own neighbours rather than against the genome,
+    // each of them is plainly spurious.
+    size_t removeLocallyWeak(double fraction, double absoluteFloor);
+
+    // Joins pairs of dead ends whose sequences overlap exactly.
+    //
+    // A de Bruijn graph breaks wherever a single k-mer is missing -- one
+    // uncorrected error in a low-coverage stretch is enough -- and no decision
+    // rule can repair that, because there is no edge to choose. The two
+    // unitigs still overlap in sequence, though, so an exact overlap of at
+    // least `minOverlap` between one's tail and another's head is evidence the
+    // graph lost an edge that the reads support. Low-complexity overlaps are
+    // refused: a run of a single base matches everywhere and means nothing.
+    //
+    // Returns the number of edges added.
+    //
+    // NOTE (build_v3, T36): despite `minOverlap`, only an overlap of exactly k-1 is ever
+    // tested (a Link has no length of its own), requests above k-1 return at once, and on
+    // a graph from build() no two dead ends can share an exact (k-1) overlap -- build()
+    // links every such pair. simplify() therefore calls this only when a cheap exact count
+    // finds a candidate pair; it remains available for hand-made graphs.
+    size_t joinDeadEnds(size_t minOverlap);
+
+    // SPAdes-style gap closing: bridge two dead ends that share an exact overlap of
+    // [minIntersection, k-2] bases, inserting a new unitig carrying the bases between them.
+    //
+    // joinDeadEnds above can only take an overlap of exactly k-1 -- a zero-length gap --
+    // because a Link has no length of its own. Measured over 36 panel graphs and roughly
+    // ten thousand dead ends that condition is satisfied exactly ZERO times, so it never
+    // fires. SPAdes refuses the zero gap outright and closes the range this cannot express:
+    // gaps of 1..k-1-minIntersection bases, where the missing sequence is already carried
+    // in both flanks' terminal overhangs. Over the same 36 graphs that range holds 1,096
+    // closable pairs.
+    //
+    // The Link limitation is sidestepped rather than lifted: instead of shortening a link,
+    // a bridge unitig is inserted whose sequence is (tail's last k-1) + (the missing bases),
+    // so every link still splices exactly k-1 and mergeInto is untouched.
+    //
+    // `nominated` optionally restricts joins to oriented end-pairs some external evidence
+    // has vouched for -- SPAdes requires two read pairs. nullptr means sequence alone, which
+    // is how SPAdes behaves when no paired library is present.
+    // requireUniqueCompatible enables experimental two-phase selection: nominate
+    // all eligible partners first, then join only mutually unique compatible ends.
+    size_t closeGapsByOverlap(size_t minIntersection,
+                              const std::set<std::pair<uint64_t, uint64_t>>* nominated,
+                              size_t* pairsTested = nullptr,
+                              bool requireUniqueCompatible = false);
+    // Runs the full simplification schedule until it converges.
+    // `bubbleCoverageLimit` is the fraction of mean coverage below which a
+    // bubble side may be discarded; raising it collapses diverged repeat
+    // copies too, which buys contiguity at the risk of misassembly.
+    // errorThreshold: coverage below which an edge is error-level, fitted from the
+    // rung's own k-mer histogram. 0 falls back to the fixed multiple of meanCoverage.
+    void simplify(double meanCoverage, int readLength, bool verbose,
+                  double bubbleCoverageLimit = 0.35, int maxRounds = 12,
+                  std::vector<SimplifyRoundStats>* rounds = nullptr,
+                  double errorThreshold = 0.0);
+
+    // ---- traversal helpers ----
+    // Sequence of `u` in the given orientation (0 = forward, 1 = reverse).
+    std::string oriented(uint32_t u, int orient) const;
+    // Links leaving `u` when travelling in `orient`.
+    const std::vector<Link>& exits(uint32_t u, int orient) const {
+        return nodes[u].ends[orient == 0 ? 1 : 0];
+    }
+    // Orientation adopted after following a link.
+    static int enterOrient(const Link& l) { return l.toEnd == 0 ? 0 : 1; }
+
+    // ---- reporting ----
+    size_t liveCount() const;
+    size_t totalLength() const;
+    size_t n50() const;
+    double medianCoverage() const;
+    void stats(const char* label, bool verbose) const;
+
+    // Emits every unitig longer than `minLen` as a contig.
+    void toContigs(size_t minLen, std::vector<std::string>& seqs,
+                   std::vector<double>& covs) const;
+
+    // T28 (build_v3, TESSERACT_FIX_HAIRPIN_KEEP=1, default off). A unitig end whose
+    // terminal (k-1)-mer is a reverse-complement palindrome carries a hairpin: a link from
+    // that end back to itself, made by build(). When compaction absorbs the node that
+    // carries it, mergeInto used to drop it, and when the carrier absorbed its neighbour
+    // instead the hairpin survived -- so node numbering decided the topology. With the fix
+    // the hairpin moves onto the merged end, as the k-mers say it should. The flag is read
+    // when the graph is constructed (per graph, not per process); the setter overrides it.
+    void setKeepHairpins(bool on) { keepHairpins_ = on; }
+    bool keepHairpins() const { return keepHairpins_; }
+    size_t hairpinsKept() const { return hairpinsKept_; }        // moved onto a merged end
+    size_t hairpinsDropped() const { return hairpinsDropped_; }  // lost (flag off)
+
+private:
+    void addLink(uint32_t u, int ue, uint32_t v, int ve);
+    void unlink(uint32_t u, int ue, uint32_t v, int ve);
+    bool mergeInto(uint32_t u, int ue);
+
+    int k_ = 0;
+    bool keepHairpins_ = fixflags::fixLevel("TESSERACT_FIX_HAIRPIN_KEEP") > 0;
+    size_t hairpinsKept_ = 0;
+    size_t hairpinsDropped_ = 0;
+};
+
+// Sequence identity between two strings, computed with banded edit distance.
+// Returns a value in [0,1]. Used to decide whether two paths form a bubble.
+double sequenceIdentity(const std::string& a, const std::string& b, int maxBand);
+
+}  // namespace ts

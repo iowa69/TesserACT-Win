@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+#
+# Programs of the upstream C++ test suite (tests/test_*.cpp) that are NOT built for Windows.
+# One per line: the program name, then the reason. recipe.py (test_programs, build_tests) reads
+# this file, so the Windows CI skips exactly these and builds and runs every other one
+# (47 of 61 for TesserACT 1.6.2). All of them are built and run on Linux, on the same staged tree.
+#
+# Found by cross-compiling every program with MinGW-w64 UCRT GCC 16: these twelve do not compile,
+# because Windows has no fork() and no waitpid(). What they check (a bad TESSERACT_* value ends the
+# run with status 2; the command line of the built program) is also covered by tests/run_tests.sh.
+test_correction_unique_best fork() and waitpid() through tests/env_reject.h
+test_envflags fork() and waitpid() through tests/env_reject.h
+test_envflags_retrofit fork() and waitpid() through tests/env_reject.h
+test_polish_original_quality fork() and waitpid() through tests/env_reject.h
+test_resolver_coverage_modes fork() and waitpid() through tests/env_reject.h
+test_resolver_read_threads fork() and waitpid() through tests/env_reject.h
+test_v14_defaults calls fork() and waitpid() itself
+test_v3_graph_counter_lines calls fork() and waitpid() itself
+test_v3_graph_counter_staging calls fork() and waitpid() itself
+test_v3_graph_joindeadends calls fork() and waitpid() itself
+test_v3_io_cli calls fork(), waitpid() and execv() itself; opens /dev/null
+test_v3_rel_coupling calls fork() and waitpid() itself; opens /dev/null
+# Compiles and links, but cannot finish: std::filesystem::create_symlink is a stub in libstdc++
+# for Windows (it always fails with "function not supported"), the call is not guarded, and the
+# uncaught exception ends the program in its same-file section (T32). The same-file test itself
+# is covered on Windows by the self-test (TS_COMPAT_SELFTEST=1) and by tests/run_tests.sh.
+test_v3_io_seqio std::filesystem::create_symlink always throws on Windows (libstdc++ stub)
+# Not a test: the helper that tests/test_dev_fork_batch.py drives. It includes
+# src/dev_fork_batch.cpp (fork, signals, /proc), which is not part of the Windows build.
+test_dev_fork_batch helper of tests/test_dev_fork_batch.py; includes src/dev_fork_batch.cpp

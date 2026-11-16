@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tesseract-win"
+dynamic = ["version"]
+description = "Trim and assemble bacterial genomes on Windows: a portable window around TesserACT and scepter"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Giovanni Lorenzin" }]
+maintainers = [{ name = "IOWA-BioTech" }]
+# The program itself uses the standard library only. This list stays empty.
+dependencies = []
+
+[project.optional-dependencies]
+# Drag-and-drop in the window. Absent: the Add buttons still work.
+gui = ["tkinterdnd2==0.4.3"]
+build = ["pyinstaller==6.22.3", "pillow>=10"]
+test = ["pytest>=7.0", "pillow>=10"]
+
+[project.gui-scripts]
+tesseract-win = "tesseract_win.__main__:main"
+
+[tool.setuptools]
+packages = ["tesseract_win", "tesseract_win.gui"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tesseract_win.versions.APP_VERSION" }
+
+[tool.setuptools.package-data]
+tesseract_win = ["assets/*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "engines: needs the built engines (build/engines/<platform> or TESSERACT_WIN_ENGINES)",
+    "parity: compares against outputs captured from the bash tesseract script",
+    "gui: opens Tk windows; needs a display",
+    "slow: takes more than about 10 seconds",
+    "windows: only meaningful on Windows",
+]

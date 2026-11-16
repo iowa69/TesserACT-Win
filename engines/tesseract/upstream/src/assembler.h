@@ -1,0 +1,214 @@
+// Assembly orchestration: the multi-k loop and the stages that run around it.
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "defaults.h"
+#include "graph.h"
+#include "libqc.h"
+#include "mappolish.h"
+#include "organism_join.h"
+#include "organism_layout.h"
+#include "organism.h"
+#include "report.h"
+#include "seqio.h"
+
+namespace ts {
+
+// Presets trading speed against contiguity and caution. A mode only fills in
+// knobs the user left alone; an explicit flag always wins.
+enum class RunMode { Fast, Standard, Careful, Aggressive };
+
+const char* runModeName(RunMode m);
+bool parseRunMode(const std::string& s, RunMode& out);
+
+struct AssemblyOptions {
+    std::vector<Library> libraries;
+    std::string outDir = "tesseract_out";
+    std::vector<int> kValues;        // empty means "choose from mode and read length"
+    int threads = 0;                 // 0 = hardware concurrency
+    uint32_t forcedCutoff = 0;       // 0 = auto
+    // The trusted k-mer set the READ CORRECTOR anchors on is a separate decision from
+    // the abundance cutoff applied to the graph, and tying them together makes -c a
+    // silent two-variable change: at -c 1 every k-mer becomes trusted, so no k-mer run
+    // ever breaks, nothing is corrected and nothing is masked. Measured on five isolates
+    // -- every -c 1 run reported "0 bases corrected in 0 reads" against 121k-257k
+    // corrected and up to 16.6 Mb masked in the paired default runs. Any experiment that
+    // varied -c was therefore also turning correction off without saying so.
+    // 0 = auto, and it never inherits -c.
+    uint32_t trustCutoff = 0;
+    // Shortest unvouchable stretch the corrector masks. Masking and the abundance
+    // cutoff discard the same low-coverage bases, so either alone hides the other's
+    // effect; exposing this makes the two separable.
+    uint32_t minMaskRun = 8;
+    size_t minContigLen = 0;         // 0 = 2*maxK
+    bool verbose = true;
+    bool correctReads = true;
+    bool resolveRepeats = true;
+    bool scaffold = true;
+    bool gapFill = true;
+    bool polish = true;
+    bool emitGfa = true;
+    bool emitHtml = true;
+    bool emitUnitigs = false;
+
+    RunMode mode = RunMode::Standard;
+    int minLinkSupport = 2;          // floor on paired reads needed to trust a join
+    // Paired support required per unit of median unitig coverage before a
+    // contested join is taken. A flat count cannot mean the same thing at every
+    // depth, and the trade it controls is contiguity against chimeric joins --
+    // measured across 20 closed-reference isolates:
+    //     flat 2   median NGA50 303,624   12 misassemblies
+    //     0.07                  291,265    7
+    //     0.10                  277,799    3
+    //
+    // Retuned 0.10 -> 0.02 (with tieRatio 1.15 -> 1.02) against 50 closed-reference
+    // strains chosen for being ones SPAdes wins. The 20-isolate measurement above is not
+    // contradicted -- it swept ONE knob on a panel that was not selected for difficulty,
+    // and it was right that loosening this alone costs misassemblies. What changed is that
+    // the cost is now paid for elsewhere: the carry-weight boost that this release also
+    // disables was itself generating misassemblies, and removing it buys back more than
+    // the looser threshold spends.
+    //
+    // Measured together on those 50 strains, against SPAdes:
+    //     setting                       NGA50 W/L   median deficit   misassemblies W/L
+    //     0.10 / 1.15 (previous)          4/46        -25,414           16/13
+    //     0.05 / 1.05                    14/36        -20,901           15/16
+    //     0.02 / 1.02 (this)             18/32        -10,072           15/16  (p=0.91)
+    //     0.00 / 1.00                    19/31        -10,072           14/19
+    //
+    // 0.00/1.00 buys one more contiguity win and gives back misassemblies for it, so the
+    // knob is set one notch short of its limit rather than at it.
+    double linkSupportPerX = 0.02;
+    // Winning branch must beat the runner-up by this. 1.4.0: 3.0 (the combo3 F2 default,
+    // src/defaults.h); 1.3.0 shipped the 1.02 tuned above (--tie-ratio 1.02 restores it).
+    double tieRatio = defaults::kDefaultTieRatio;
+    double bubbleCoverageLimit = 0.35;   // see UnitigGraph::simplify
+    int simplifyRounds = 12;
+    int polishPasses = 1;
+    long long maxMemoryBytes = 0;   // 0 = 80% of physical RAM
+    QualityTrim qtrim;              // 3' trimming applied as reads are loaded
+
+    // Emit sequence that a smaller rung resolved and the final graph then lost.
+    // Contigs come from the final graph alone, so the highest rung decides what survives;
+    // this appends only the difference, never a second copy of what is already there.
+    bool ladderUnion = false;   // off until the factorial says otherwise
+    double ladderUnionMaxPresent = 0.50;   // append only if under half its 31-mers are present
+    size_t ladderUnionMinLen = 1000;
+
+    // Drop a contig that is an exact substring of a longer contig of the same assembly.
+    // Measured over 185 S. aureus isolates: 6.2% of our contigs are exact substrings of a
+    // longer one and they carry 47% of our QUAST duplication excess; SPAdes emits 0 of
+    // 1554. Off until the panel says otherwise.
+    // ON by default. Measured against each isolate's own closed genome on two independent
+    // cohorts: it takes QUAST duplication vs SPAdes from 4/152 (p=3e-25) to a dead heat on
+    // S. aureus, and Cliff's delta +0.97 -> +0.05 on E. faecium, while every other win is
+    // unchanged to the decimal. `--no-dedup-contained` restores the old emission.
+    bool dedupContained = true;
+
+    // Trim an exact dovetail longer than this between two contig ends, from the shorter
+    // partner. 0 disables. Raised to the final k if set lower: a k-length overhang is the
+    // unavoidable de Bruijn artefact and SPAdes carries it too.
+    // ON by default, raised to the final k internally. dedup alone is much weaker on
+    // E. faecium (1.0110 -> 1.0070) than on S. aureus, so both halves are needed; together
+    // they reach 1.0010 against SPAdes' 1.0010. `--trim-overlap 0` disables.
+    size_t trimTerminalOverlap = 1;
+
+    // The command line as invoked, recorded into the reports so a run can be
+    // explained and reproduced from its own output.
+    std::string commandLine;
+
+    // A prior learned from closed genomes of the same organism, used only at
+    // junctions no fragment can span. Empty means the assembly stops there
+    // rather than guessing, which is the default.
+    std::string organism;            // informational; names the expected model
+    std::string organismModelPath;
+    // Known insertion sequences. Contig ends inside one are left unjoined,
+    // because that is where this isolate differs from the panel by construction.
+    std::string isPanelPath;
+    // Recurrent insertion sites: flank signatures that let an element be
+    // placed on the chromosome rather than merely avoided.
+    std::string isSitesPath;
+
+    // A QC report over the same reads, produced by scepter (formerly fastplus). It
+    // carries measurements the assembler would otherwise have to infer from its own
+    // k-mer histograms -- read depth, genome size, and an error rate observed by
+    // comparing overlapping mates -- and it carries them BEFORE the first rung is
+    // counted, which is the only time several of the decisions below can still be made.
+    // Empty means every such decision falls back to the self-derived estimate.
+    std::string qcPath;
+    // Lay the finished contigs out against the panel chromosome they most resemble, when
+    // the model carries layout tracks. On by default because it is what closes the
+    // chromosome; --no-layout leaves the assembly de novo in its ordering as well as its
+    // sequence, which is the right choice when the ordering must not rest on a relative.
+    bool layout = true;
+
+    // Polishing against a full read alignment, after the k-mer polisher has
+    // done what it can. Off unless a mapper is named, since it shells out.
+    Mapper mapPolisher = Mapper::None;
+    std::string mapperDir;
+
+    // Set when the user named the knob explicitly, so applyMode() leaves it be.
+    bool userSetK = false, userSetMinLink = false, userSetTie = false, userSetLinkPerX = false,
+         userSetBubble = false, userSetRounds = false, userSetPolishPasses = false;
+
+    void applyMode();
+};
+
+struct AssemblyStats {
+    size_t contigs = 0;
+    size_t totalLength = 0;
+    size_t n50 = 0;
+    size_t largest = 0;
+    double meanCoverage = 0;
+    double gcPercent = 0;
+    double seconds = 0;
+    std::vector<int> kUsed;
+};
+
+class Assembler {
+public:
+    explicit Assembler(AssemblyOptions opt);
+
+    bool run(std::string& error);
+    const AssemblyStats& stats() const { return stats_; }
+    const AssemblyReport& report() const { return report_; }
+    bool diagnosticBatchComplete() const { return diagnosticBatchComplete_; }
+    bool diagnosticForkChild() const { return diagnosticForkChild_; }
+
+private:
+    // Picks the k ladder from the mode and the observed read length, then lets the QC
+    // report veto rungs the library is too thin to support.
+    std::vector<int> resolveKLadder() const;
+    std::vector<int> baseKLadder() const;
+    // Bases that still yield at least one k-mer at this k, over the whole library.
+    uint64_t kmerMassAt(int k) const;
+    // Append reserve contigs from earlier rungs whose sequence the final graph dropped.
+    size_t rescueLadderContigs(const std::vector<std::string>& reserve,
+                               std::vector<std::string>& seqs, std::vector<double>& covs) const;
+    std::vector<int> trimLadderToCoverage(std::vector<int> ladder) const;
+
+    // One de Bruijn iteration: count, filter, build, simplify.
+    bool iterate(int k, const std::vector<std::string>& carryOver, UnitigGraph& graph,
+                 double& meanCoverage, KIteration& it, std::string& error,
+                 double prevPeak = 0.0);
+
+    // Coverage peak of the first k (no carry-over) and that k, used to project how
+    // thin the later rungs will be without letting the boost feed back on itself.
+    double basePeak_ = 0.0;
+    int baseK_ = 0;
+    int finalK_ = 0;   // largest k in the ladder, set before the loop
+
+    bool diagnosticBatchComplete_ = false;
+    bool diagnosticForkChild_ = false;
+    AssemblyOptions opt_;
+    LibraryQC qc_;
+    SequenceStore reads_;
+    OrganismModel organismModel_;
+    IsPanel isPanel_;
+    AssemblyStats stats_;
+    AssemblyReport report_;
+};
+
+}  // namespace ts

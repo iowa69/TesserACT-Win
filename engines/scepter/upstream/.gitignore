@@ -1,0 +1,25 @@
+
+# Build artefacts
+# Editor / OS noise
+# Reports produced by running the tool in the source tree
+# Test scratch space
+*.a
+*.d
+*.o
+*.pyc
+*.so
+*.swp
+*~
+.DS_Store
+.cache/
+/scepter
+__pycache__/
+build/
+compile_commands.json
+scepter-compat.*/
+scepter-tests.*/
+scepter.html
+scepter.json
+scepter.tsv
+tests/scratch/
+tests/tmp/

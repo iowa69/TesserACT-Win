@@ -1,0 +1,225 @@
+// Read storage. Reads are 2-bit packed and held in memory for the whole run,
+// because every stage after counting (error correction, unitig mapping, paired
+// end resolution, polishing) needs random access to them.
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "kmer.h"
+
+namespace ts {
+
+// 3' quality trimming applied as reads are loaded, before anything is counted.
+struct QualityTrim {
+    bool enabled = true;
+    int windowSize = 4;
+    int meanQuality = 20;
+    int phredOffset = 33;
+};
+
+// Length a read keeps once its 3' end is cut back to where quality holds up,
+// using the same sliding window as fastp's --cut_tail. Returns `len` unchanged
+// when trimming is off or there is no quality line. Exposed for testing.
+uint32_t qualityTrimmedLength(const char* qual, size_t len, const QualityTrim& qt);
+
+// What load() read, and what it tolerated on the way in. load() prints these as one
+// "[seqio]" line on every successful run, zeros included, so a run log shows whether
+// either tolerance was ever needed.
+struct LoadStats {
+    size_t files = 0;
+    size_t records = 0;
+    // Empty lines skipped in a FASTQ file where a '@' header was due: a trailing blank
+    // line, or one between records. Leading blank lines were always skipped and are
+    // not counted.
+    size_t interRecordBlankLines = 0;
+    // Mate pairs whose names agree only once a trailing '.1' / '.2' is set aside
+    // (fastq-dump --readids writes SRR.spot.1 and SRR.spot.2).
+    size_t dotSuffixMatePairs = 0;
+};
+
+// One input library.
+struct Library {
+    std::string r1;
+    std::string r2;      // empty for single-end
+    bool interleaved = false;
+    // Filled in by insert-size estimation.
+    double insertMean = 0;
+    double insertStdDev = 0;
+    int readLength = 0;
+    bool oriented = true;   // true = FR (Illumina paired-end)
+};
+
+class SequenceStore {
+public:
+    SequenceStore() = default;
+
+    // Loads every library. Paired reads are stored adjacently so the mate of
+    // read i is always i^1, which keeps pair lookups branch-free.
+    bool load(const std::vector<Library>& libs, int threads, std::string& error);
+
+    // Counters of the last successful load() (all zero after a failed one).
+    const LoadStats& loadStats() const { return loadStats_; }
+
+    size_t size() const { return offsets_.size() > 0 ? offsets_.size() - 1 : 0; }
+    size_t totalBases() const { return totalBases_; }
+
+    uint32_t length(size_t i) const {
+        return static_cast<uint32_t>(offsets_[i + 1] - offsets_[i]);
+    }
+
+    // Base code 0..3, or -1 when the position was an ambiguous base.
+    int baseAt(size_t read, uint32_t pos) const {
+        uint64_t bit = offsets_[read] + pos;
+        if (isAmbiguous(bit)) return -1;
+        uint64_t word = data_[bit >> 5];
+        return static_cast<int>((word >> ((bit & 31) * 2)) & 3);
+    }
+
+    // The stored base regardless of the ambiguity bit. Masking a range does not
+    // erase what was read there, it only withdraws the claim that the base is
+    // trustworthy -- and a stage that supplies its own evidence threshold can
+    // reasonably look again. Gap closing does exactly that: the reads the
+    // corrector gave up on are disproportionately the ones covering a gap,
+    // because low coverage is what created both the mask and the gap.
+    // Positions that were ambiguous in the input read as 'A' here, which the
+    // caller must be able to tolerate.
+    int rawBaseAt(size_t read, uint32_t pos) const {
+        uint64_t bit = offsets_[read] + pos;
+        uint64_t word = data_[bit >> 5];
+        return static_cast<int>((word >> ((bit & 31) * 2)) & 3);
+    }
+
+    void decode(size_t read, std::string& out) const;
+    std::string decode(size_t read) const {
+        std::string s;
+        decode(read, s);
+        return s;
+    }
+
+    bool paired() const { return paired_; }
+
+    // Reads [0, pairedReads()) come from paired libraries and are stored
+    // adjacently, so the mate of read i is i^1. Reads at or above it are
+    // single-end and have no mate -- mateOf() must not be called on them.
+    size_t pairedReads() const { return pairedReads_; }
+    size_t mateOf(size_t i) const { return i ^ 1; }
+    bool hasMate(size_t i) const { return i < pairedReads_; }
+    size_t pairCount() const { return pairedReads_ / 2; }
+
+    // Overwrite a base, used by the read error corrector.
+    void setBase(size_t read, uint32_t pos, int code);
+
+    // Marks [from, to) of a read ambiguous so every k-mer spanning it is
+    // skipped. The corrector uses this to discard stretches it cannot vouch
+    // for -- the k-mer-spectrum equivalent of quality trimming.
+    //
+    // NOT thread-safe, and must run after any setBase on the same read: it may
+    // grow the ambiguity bitmap, and setBase clears the ambiguity bit for the
+    // position it writes. Call it serially, as correctReads does.
+    void maskRange(size_t read, uint32_t from, uint32_t to);
+
+    uint32_t maxReadLength() const { return maxLen_; }
+
+    // Must be set before load() to have any effect.
+    void setQualityTrim(const QualityTrim& qt) { qtrim_ = qt; }
+    uint64_t trimmedBases() const { return trimmedBases_; }
+
+    // Present only when TESSERACT_POLISH_ORIGINAL_QUALITY was exactly "1"
+    // during load(). Input calls/Q retain the existing trimmed coordinates;
+    // subsequent EC mutations and masks never change this provenance.
+    bool hasOriginalQualities() const { return originalQualitiesRetained_; }
+    int originalBaseAt(size_t read, uint32_t pos) const {
+        if (!originalQualitiesRetained_) return -1;
+        const uint64_t bit = offsets_[read] + pos;
+        if ((originalAmbiguous_[bit >> 6] >> (bit & 63)) & 1ULL) return -1;
+        return static_cast<int>((originalData_[bit >> 5] >> ((bit & 31) * 2)) & 3);
+    }
+    int originalQualityAt(size_t read, uint32_t pos) const {
+        if (!originalQualitiesRetained_) return -1;
+        const uint8_t q = originalQualities_[offsets_[read] + pos];
+        return q == 255 ? -1 : static_cast<int>(q);
+    }
+    size_t originalQualityBytes() const {
+        return (originalData_.capacity() + originalAmbiguous_.capacity()) * sizeof(uint64_t) + originalQualities_.capacity();
+    }
+
+private:
+    bool isAmbiguous(uint64_t bit) const {
+        return !ambiguous_.empty() && (ambiguous_[bit >> 6] >> (bit & 63)) & 1ULL;
+    }
+
+    std::vector<uint64_t> data_;        // 2 bits per base
+    std::vector<uint64_t> ambiguous_;   // 1 bit per base, set for non-ACGT
+    std::vector<uint64_t> offsets_;     // size()+1 entries, in bases
+    uint64_t totalBases_ = 0;
+    uint32_t maxLen_ = 0;
+    bool paired_ = false;
+    size_t pairedReads_ = 0;
+    QualityTrim qtrim_;
+    uint64_t trimmedBases_ = 0;
+    std::vector<uint64_t> originalData_;
+    std::vector<uint64_t> originalAmbiguous_;
+    std::vector<uint8_t> originalQualities_; // numerical Q0..93;255 unavailable
+    bool originalQualitiesRetained_ = false;
+    LoadStats loadStats_;
+};
+
+struct MateRescueStats {
+    size_t pairsExamined = 0;
+    size_t overlapsAccepted = 0;
+    size_t ambiguousOverlaps = 0;
+    size_t readsRescued = 0;
+    size_t basesRescued = 0;
+};
+
+// Experimental, conservative recovery after spectrum correction. maskedReadIds
+// must contain only reads which were entirely ACGT before correction; the
+// corrector supplies exactly that provenance. Original input Ns are never
+// interpreted through rawBaseAt(). Original pairs and read lengths are kept.
+MateRescueStats rescueMateOverlaps(SequenceStore& reads,
+                                  const std::vector<uint32_t>& maskedReadIds);
+
+// Streams every valid k-mer of a read to `fn` as (canonicalKmer, position).
+// Runs of ambiguous bases restart the rolling k-mer.
+template <typename Fn>
+inline void forEachKmer(const SequenceStore& store, size_t read, int k, Fn&& fn) {
+    const uint32_t len = store.length(read);
+    if (len < static_cast<uint32_t>(k)) return;
+    Kmer fwd = 0, rc = 0;
+    int valid = 0;
+    for (uint32_t p = 0; p < len; ++p) {
+        int c = store.baseAt(read, p);
+        if (c < 0) { valid = 0; fwd = 0; rc = 0; continue; }
+        fwd = pushBack(fwd, c, k);
+        rc = pushFrontRc(rc, c, k);
+        if (++valid >= k) {
+            fn(fwd < rc ? fwd : rc, p + 1 - static_cast<uint32_t>(k));
+        }
+    }
+}
+
+// As forEachKmer, but reading through the ambiguity mask -- see rawBaseAt.
+// Nothing restarts the rolling window, so every position of the read yields a
+// k-mer and a masked stretch contributes whatever bases were stored there.
+template <typename Fn>
+inline void forEachKmerRaw(const SequenceStore& store, size_t read, int k, Fn&& fn) {
+    const uint32_t len = store.length(read);
+    if (len < static_cast<uint32_t>(k)) return;
+    Kmer fwd = 0, rc = 0;
+    for (uint32_t p = 0; p < len; ++p) {
+        const int c = store.rawBaseAt(read, p);
+        fwd = pushBack(fwd, c, k);
+        rc = pushFrontRc(rc, c, k);
+        if (p + 1 >= static_cast<uint32_t>(k)) {
+            fn(fwd < rc ? fwd : rc, p + 1 - static_cast<uint32_t>(k));
+        }
+    }
+}
+
+// Writes contigs to a FASTA file with standard line wrapping.
+bool writeFasta(const std::string& path, const std::vector<std::string>& seqs,
+                const std::vector<std::string>& names, int lineWidth, std::string& error);
+
+}  // namespace ts

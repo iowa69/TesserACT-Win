@@ -1,0 +1,628 @@
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <sys/stat.h>
+
+#include "assembler.h"
+#include "defaults.h"
+#include "envflags.h"
+#include "resolve.h"
+#include "version.h"
+#include "kmer.h"
+#include "organism.h"
+#include "organism_detect.h"
+#include "util.h"
+
+namespace {
+
+using ts::kVersion;
+using ts::kAuthor;
+using ts::kOrg;
+
+// A tesseract is a cube inside a cube with the corresponding corners joined; this is that
+// projection, which is where the assembler's name comes from. Printed on --help only.
+//
+// Deliberately NOT on --version: that line is parsed by scripts, by the conda package test
+// and by anything recording which version produced a result, and it stays one machine
+// readable line for exactly that reason. The attribution goes on a second line there, where
+// a parser reading the first line is unaffected.
+constexpr const char* kLogo =
+    "        #####################################\n"
+    "        ##                                 ##\n"
+    "        ##\\  ###########################  /##\n"
+    "        ##   ##                       ##   ##\n"
+    "        ##   ##   T E S S E R A C T   ##   ##\n"
+    "        ##   ##                       ##   ##\n"
+    "        ##/  ###########################  \\##\n"
+    "        ##                                 ##\n"
+    "        #####################################\n";
+
+void usage() {
+    std::printf("%s\n", kLogo);
+    std::printf(
+        "TesserACT %s - de novo short-read assembler (de Bruijn, multi-k)\n"
+        "  %s  \u00b7  %s\n"
+        "\n"
+        "USAGE\n"
+        "  tesseract-asm -1 R1.fq.gz -2 R2.fq.gz -o OUTDIR [options]\n"
+        "  tesseract-asm --12 interleaved.fq.gz -o OUTDIR\n"
+        "  tesseract-asm -s single.fq.gz -o OUTDIR\n"
+        "\n"
+        "INPUT\n"
+        "  -1, --read1 FILE        forward reads (FASTQ/FASTA, optionally gzipped)\n"
+        "  -2, --read2 FILE        reverse reads\n"
+        "      --12 FILE           interleaved paired reads in one file\n"
+        "  -s, --single FILE       unpaired reads\n"
+        "\n"
+        "OUTPUT\n"
+        "  -o, --out DIR           output directory (default: tesseract_out)\n"
+        "      --min-contig N      minimum contig length to report (default: 2*k)\n"
+        "\n"
+        "ORGANISM MODEL\n"
+        "      --organism NAME     use the bundled model for this organism, the file\n"
+        "                          NAME.tsm. Run tesseract-get-models once to install\n"
+        "                          them; they go to ~/.tesseract/models and\n"
+        "                          TESSERACT_MODEL_DIR moves that. Names: saureus,\n"
+        "                          efaecium, abaumannii, paeruginosa, ecloacae, ecoli,\n"
+        "                          kpneumoniae (klebsiella is accepted for kpneumoniae),\n"
+        "                          senterica (salmonella is accepted for senterica).\n"
+        "                          The model is consulted only at junctions no fragment\n"
+        "                          can span: the chromosome is reconstructed first from\n"
+        "                          conserved gene order, then plasmids are refined\n"
+        "                          against the plasmid table. Without it those junctions\n"
+        "                          are left broken rather than guessed at.\n"
+        "                          Optional: on 329 test isolates it raised median NGA50\n"
+        "                          134 -> 156 kb but roughly doubled misassemblies.\n"
+        "\n"
+        "      --is-panel FILE     FASTA of known insertion sequences. Contig ends\n"
+        "                          lying inside one are left unjoined: that is where\n"
+        "                          this isolate differs from the panel by construction.\n"
+        "      --is-sites FILE     table of recurrent insertion sites (flank\n"
+        "                          signatures); lets an element be placed on the\n"
+        "                          chromosome instead of leaving the end unjoined\n"
+        "      --no-layout         do not order and orient the finished contigs against\n"
+        "                          the panel chromosome they most resemble. Layout is what\n"
+        // Escaped, and it matters: this is a printf format string, so a bare % begins a
+        // conversion. `% o` is not a valid one, and printf stopped there -- `tesseract-asm --help`
+        // printed four lines and no option list at all. A conda recipe test that greps the
+        // help for a flag is what surfaced it.
+        "                          closes the chromosome -- on this cohort 95.6%% of\n"
+        "                          isolates reach 90%% of their chromosome in one contig\n"
+        "                          with it and 23%% without -- but the ORDER it produces is\n"
+        "                          inferred from a different genome, not observed in these\n"
+        "                          reads. Use this when that distinction matters.\n"
+        "      --map-polish NAME   polish the finished contigs against a full read\n"
+        "                          alignment: bowtie2 | bwa | none (default none)\n"
+        "      --mapper-dir DIR    where to find the mapper binaries\n"
+        "\n"
+        "LIBRARY QC\n"
+        "      --qc FILE           JSON report from scepter (or fastplus) over these\n"
+        "                          same reads, run with --preset wgs-bacteria. Supplies\n"
+        "                          read depth, genome size and a measured error rate\n"
+        "                          before the first k-mer is counted, so the k ladder\n"
+        "                          and the coverage-dependent thresholds are chosen from\n"
+        "                          a measurement instead of inferred from the graph they\n"
+        "                          go on to shape. An unreadable or spectrum-less report\n"
+        "                          is an error, not a warning.\n"
+        "\n"
+        "MODES\n"
+        "      --mode NAME         fast | standard (default) | careful | aggressive\n"
+        "                          fast       fewer k values, no polishing\n"
+        "                          standard   balanced; what the benchmarks use\n"
+        "                          careful    denser k ladder, more simplification, 2 polish\n"
+        "                                     passes; its tie ratio (1.4) is below the 1.4.0\n"
+        "                                     standard default (3.0), so it is no longer the\n"
+        "                                     stricter mode on that knob\n"
+        "                          aggressive collapse diverged repeats for maximum contiguity\n"
+        "\n"
+        "OUTPUT FILES\n"
+        "      --no-gfa            skip assembly_graph.gfa\n"
+        "      --no-html           skip report.html (report.json is always written)\n"
+        "      --unitigs           also write unitigs.fasta (pre-resolution graph)\n"
+        "\n"
+        "ASSEMBLY\n"
+        "  -k, --kmers LIST        comma-separated k values, e.g. 21,33,55,77\n"
+        "                          (default: chosen from the read length; max 127)\n"
+        "  -c, --cutoff N          k-mer abundance cutoff (default: auto-detect)\n"
+        "      --min-link N        paired reads needed to trust a join (default: 2)\n"
+        "      --tie-ratio F       winning branch must beat the runner-up by F (default: %.1f;\n"
+        "                          1.3.0 used 1.02)\n"
+        "      --link-per-x F      paired support required per unit of median coverage\n"
+        "                          before a contested join is taken (default: 0.02)\n"
+        "      --bubble-coverage F a bubble branch below this fraction of its twin's\n"
+        "                          coverage is dropped (default: 0.35)\n"
+        "      --aggressive        alias for --mode aggressive: collapses diverged\n"
+        "                          repeat copies, which costs about one\n"
+        "                          misassembly per genome. Opt in knowingly.\n"
+        "      --simplify-rounds N max graph simplification passes per k\n"
+        "      --polish-passes N   consensus polishing passes (0 disables)\n"
+        "      --no-correct        skip read error correction\n"
+        "      --no-qtrim          keep 3' ends that fall below the quality cutoff\n"
+        "      --qtrim-quality N   3' trim below mean quality N (default: 20)\n"
+        "      --qtrim-window N    window used for the 3' quality scan (default: 4)\n"
+        "      --no-resolve        skip paired-end repeat resolution\n"
+        "      --no-scaffold       skip scaffolding\n"
+        "      --no-gapfill        skip scaffold gap closing\n"
+        "      --ladder-union      also emit what a smaller k resolved and the final graph lost\n"
+        "      --dedup-contained   drop contigs that are exact substrings of a longer contig\n"
+        "      --trim-overlap N    trim exact contig-end dovetails longer than N (0: off)\n"
+        "      --no-polish         skip consensus polishing\n"
+        "\n"
+        "GENERAL\n"
+        "  -t, --threads N         worker threads (default: all cores)\n"
+        "      --max-memory GB     abort cleanly above this much RAM (default: 80%% of total)\n"
+        "  -q, --quiet             suppress progress output\n"
+        "  -v, --version           print version\n"
+        "  -h, --help              print this message\n"
+        "\n"
+        "DEFAULTS (1.4.0)\n"
+        "  1.4.0 makes the misassembly-first configuration of the combo3 campaign (F2) the\n"
+        "  default. Relative to 1.3.0: --tie-ratio 3.0 (was 1.02); the common-prefix walk at\n"
+        "  chain ends is 250 bp (was 3000) and starts only from ends whose body reaches the\n"
+        "  insert size; the three fallback joins are withdrawn; a lone join candidate needs\n"
+        "  pair support; a repeat that supports every destination loses its votes; the\n"
+        "  coverage-dropout bridge is on; and the 21 output-changing defect fixes are on\n"
+        "  (TESSERACT_FIXES), among them the carry-read gate (T01) and the revisit guard (T07).\n"
+        "  Every run prints the values in force on one [defaults] line of its log.\n"
+        "  The cost, measured against the campaign's previous best settings (K2) on two fresh\n"
+        "  panels: more contigs (+3.3 per isolate on 140 ESKAPEE isolates; +9.7 mean, +3\n"
+        "  median on 82 isolates of 28 other species) and a lower NGA50 (geometric mean\n"
+        "  x0.94 and x0.93). The revisit guard (T07) alone costs NGA50 x0.96 on the\n"
+        "  development panel and removes no extensive misassembly. On a low-coverage library\n"
+        "  the carry-read gate (T01) can cost genome fraction: -2.6 points on one\n"
+        "  S. maltophilia isolate (k-mer depth 25), where it removed 15 of 18 misassemblies.\n"
+        "\n"
+        "REPRODUCING 1.3.0\n"
+        "  TESSERACT_FIXES=0 TESSERACT_COMMON_PREFIX=3000 TESSERACT_PREFIX_MIN_BODY=0 \\\n"
+        "  TESSERACT_MIN_FALLBACK_DEST=0 TESSERACT_REQUIRE_SUPPORT_SINGLE=0 \\\n"
+        "  TESSERACT_EXCLUDE_SHARED_REPEAT_SUPPORT=0 TESSERACT_DROPOUT_BRIDGE=0 \\\n"
+        "    tesseract-asm --tie-ratio 1.02 ...\n"
+        "  One fix alone is turned off with TESSERACT_FIX_<NAME>=0, for example\n"
+        "  TESSERACT_FIX_REVISIT_GUARD=0 (T07) or TESSERACT_FIX_CARRY_READ_GATE=0 (T01).\n"
+        "\n"
+        "EXAMPLES\n"
+        "  tesseract-asm -1 R1.fq.gz -2 R2.fq.gz -o asm -t 16\n"
+        "  tesseract-asm -1 R1.fq.gz -2 R2.fq.gz -o asm -k 21,33,55 --min-contig 500\n",
+        kVersion, kAuthor, kOrg, ts::defaults::kDefaultTieRatio);
+}
+
+
+}  // namespace
+
+
+// A numeric option outside its sensible range is a typo, not a preference.
+// Accepting it silently produces an assembly nobody can explain later.
+static double numInRange(const std::string& text, const char* flag, double lo, double hi) {
+    char* end = nullptr;
+    const double v = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || (end && *end != '\0')) {
+        std::fprintf(stderr, "error: %s expects a number (got '%s')\n", flag, text.c_str());
+        std::exit(2);
+    }
+    // Written so NaN fails: `v < lo || v > hi` is false for NaN, which let
+    // --tie-ratio nan through to silently disable the comparison it feeds.
+    if (!(v >= lo && v <= hi)) {
+        std::fprintf(stderr, "error: %s must be between %g and %g (got %g)\n", flag, lo, hi, v);
+        std::exit(2);
+    }
+    return v;
+}
+
+static long long intInRange(const std::string& text, const char* flag, long long lo, long long hi) {
+    const double v = numInRange(text, flag, static_cast<double>(lo), static_cast<double>(hi));
+    // The cast below truncates: "-k 21.9,55" ran k=21 and "-t 4.5" ran 4 threads. A
+    // fractional value for an integer option is a typo, not a request to round.
+    if (v != std::floor(v)) {
+        std::fprintf(stderr, "error: %s expects an integer (got '%s')\n", flag, text.c_str());
+        std::exit(2);
+    }
+    return static_cast<long long>(v);
+}
+
+// True when a and b name the same file (same device and inode), so a symlink or a
+// second spelling of the path cannot slip past a plain string comparison.
+static bool sameFile(const std::string& a, const std::string& b) {
+    struct stat sa, sb;
+    if (::stat(a.c_str(), &sa) != 0 || ::stat(b.c_str(), &sb) != 0) return a == b;
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+int main(int argc, char** argv) {
+    // Recorded verbatim so the reports can say what produced them.
+    std::string invocation;
+    for (int i = 0; i < argc; ++i) {
+        if (i) invocation += ' ';
+        invocation += argv[i];
+    }
+    using namespace ts;
+
+    AssemblyOptions opt;
+    Library lib;
+    std::vector<Library> singles;
+    bool haveLib = false;
+    bool sawK = false;
+    bool organismForce = false;   // om2 C3: run an explicit --organism the detection gate refused
+
+    if (argc < 2) { usage(); return 1; }
+
+    auto needValue = [&](int& i, const char* flag) -> const char* {
+        if (i + 1 >= argc) {
+            std::fprintf(stderr, "error: %s requires a value\n", flag);
+            std::exit(1);
+        }
+        return argv[++i];
+    };
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-h" || a == "--help") { usage(); return 0; }
+        else if (a == "-v" || a == "--version") {
+            // First line stays exactly "TesserACT <version>" -- scripts, the conda package
+            // test and provenance records all read it. Attribution goes underneath.
+            std::printf("TesserACT %s\n%s, %s\n", kVersion, kAuthor, kOrg);
+            return 0;
+        }
+        // One paired library per run, each of its files given once. Each of these used to
+        // overwrite the one before: "-1 R1 -1 R2" assembled R2 alone, unpaired, with exit
+        // 0; "-1 A --12 B" dropped A; and "--12 A -2 B" read A as R1 of a two-file pair.
+        else if (a == "-1" || a == "--read1" || a == "-2" || a == "--read2" || a == "--12") {
+            const bool isR2 = (a == "-2" || a == "--read2");
+            const bool is12 = (a == "--12");
+            const std::string v = needValue(i, a.c_str());
+            const char* clash = nullptr;
+            if (isR2 && lib.interleaved) clash = "--12 already gives both mates";
+            else if (isR2 && !lib.r2.empty()) clash = "-2 was already given";
+            else if (is12 && !lib.r2.empty()) clash = "-2 was already given";
+            else if (!isR2 && lib.interleaved) clash = "--12 was already given";
+            else if (!isR2 && !lib.r1.empty()) clash = "-1 was already given";
+            if (clash) {
+                std::fprintf(stderr,
+                    "error: %s %s: %s. One paired library per run: give -1 and -2 once each, or\n"
+                    "  --12 once on its own. Further single-end files go in with -s, which may repeat.\n",
+                    a.c_str(), v.c_str(), clash);
+                return 2;
+            }
+            if (isR2) lib.r2 = v; else lib.r1 = v;
+            if (is12) lib.interleaved = true;
+            haveLib = true;
+        }
+        // A separate library, not an overwrite of -1. Merging overlapping
+        // mates yields a set of single-end fragments plus the pairs that did
+        // not merge, and both belong in the same assembly; -s may be repeated.
+        else if (a == "-s" || a == "--single") {
+            Library sl;
+            sl.r1 = needValue(i, "-s");
+            singles.push_back(std::move(sl));
+            haveLib = true;
+        }
+        else if (a == "-o" || a == "--out") opt.outDir = needValue(i, "-o");
+        else if (a == "--organism") opt.organism = needValue(i, "--organism");
+        else if (a == "--organism-force") organismForce = true;
+        // --model is not part of the supported interface. A model is a curated artifact:
+        // its panel composition, its leave-cluster-out provenance and the exclusion lists
+        // behind it are what make its output meaningful, and a file of the right shape
+        // built from an arbitrary panel produces confident joins with nothing behind them.
+        // --organism therefore selects a bundled, checksummed model and nothing else.
+        // The flag is retained, undocumented, for building and validating the bundled
+        // models themselves; it does nothing unless TESSERACT_MODEL_AUTHOR is set.
+        else if (a == "--model") {
+            const std::string mv = needValue(i, "--model");
+            if (ts::env::present("TESSERACT_MODEL_AUTHOR")) {
+                opt.organismModelPath = mv;
+            } else {
+                std::fprintf(stderr,
+                    "error: --model is not a supported option.\n"
+                    "  Use --organism NAME to select a bundled model, and run\n"
+                    "  tesseract-get-models once to install them. A model kept elsewhere\n"
+                    "  is found by pointing TESSERACT_MODEL_DIR at the directory that\n"
+                    "  holds it as NAME.tsm.\n");
+                return 2;
+            }
+        }
+        else if (a == "--qc") opt.qcPath = needValue(i, "--qc");
+        else if (a == "--mapper-dir") opt.mapperDir = needValue(i, "--mapper-dir");
+        else if (a == "--is-panel") opt.isPanelPath = needValue(i, "--is-panel");
+        else if (a == "--is-sites") opt.isSitesPath = needValue(i, "--is-sites");
+        else if (a == "--no-layout") opt.layout = false;
+        else if (a == "--map-polish") {
+            const std::string m = needValue(i, "--map-polish");
+            if (!parseMapper(m, opt.mapPolisher)) {
+                std::fprintf(stderr, "error: unknown mapper '%s' (bowtie2 | bwa | none)\n", m.c_str());
+                return 2;
+            }
+        }
+        else if (a == "--min-contig") opt.minContigLen = static_cast<size_t>(intInRange(needValue(i, "--min-contig"), "--min-contig", 0, 100000000));
+        else if (a == "-k" || a == "--kmers") {
+            // A second -k replaced the first, so "-k 21,33 -k 55" ran k=55 alone.
+            if (sawK) {
+                std::fprintf(stderr, "error: -k/--kmers given more than once; list every k in one "
+                                     "comma-separated value, e.g. -k 21,33,55\n");
+                return 2;
+            }
+            sawK = true;
+            opt.kValues.clear();
+            for (const std::string& tok : util::split(needValue(i, "-k"), ',')) {
+                // Range-checked before narrowing: atoi() truncates to int, so a
+                // value congruent to a legal k modulo 2^32 would pass a check
+                // applied afterwards and assemble at a k nobody asked for.
+                int k = static_cast<int>(intInRange(tok, "-k/--kmers", 5, kMaxK - 1));
+                // Odd k only: an even k admits palindromic k-mers, which have
+                // no well-defined canonical form.
+                if (k % 2 == 0) {
+                    std::fprintf(stderr, "error: k must be odd to avoid palindromic k-mers (got %d)\n", k);
+                    return 1;
+                }
+                // The ladder runs in the order given and correction uses its first rung, so
+                // "-k 77,21,55" corrected at k=77 and carried contigs downwards, and "-k 21,21"
+                // counted k=21 twice. Sorting silently would change what such a run produces,
+                // so they are refused instead.
+                if (!opt.kValues.empty() && k <= opt.kValues.back()) {
+                    std::fprintf(stderr,
+                                 "error: -k/--kmers values must be strictly increasing (got %d after %d)\n",
+                                 k, opt.kValues.back());
+                    return 2;
+                }
+                opt.kValues.push_back(k);
+            }
+            opt.userSetK = true;
+        }
+        else if (a == "-c" || a == "--cutoff") opt.forcedCutoff = static_cast<uint32_t>(intInRange(needValue(i, "-c"), "-c/--cutoff", 0, 1000000));
+        // Separate from -c on purpose: see AssemblyOptions::trustCutoff.
+        else if (a == "--mask-min-run") opt.minMaskRun = static_cast<uint32_t>(intInRange(needValue(i, "--mask-min-run"), "--mask-min-run", 1, 100000));
+        else if (a == "--trust-cutoff") opt.trustCutoff = static_cast<uint32_t>(intInRange(needValue(i, "--trust-cutoff"), "--trust-cutoff", 0, 1000000));
+        else if (a == "--min-link") { opt.minLinkSupport = static_cast<int>(intInRange(needValue(i, "--min-link"), "--min-link", 1, 1000)); opt.userSetMinLink = true; }
+        else if (a == "--link-per-x") {
+            opt.linkSupportPerX = numInRange(needValue(i, "--link-per-x"), "--link-per-x", 0.0, 10.0);
+            opt.userSetLinkPerX = true;
+        }
+        else if (a == "--tie-ratio") { opt.tieRatio = numInRange(needValue(i, "--tie-ratio"), "--tie-ratio", 1.0, 100.0); opt.userSetTie = true; }
+        else if (a == "--bubble-coverage") { opt.bubbleCoverageLimit = numInRange(needValue(i, "--bubble-coverage"), "--bubble-coverage", 0.0, 1000.0); opt.userSetBubble = true; }
+        else if (a == "--simplify-rounds") { opt.simplifyRounds = static_cast<int>(intInRange(needValue(i, "--simplify-rounds"), "--simplify-rounds", 1, 200)); opt.userSetRounds = true; }
+        else if (a == "--polish-passes") { opt.polishPasses = static_cast<int>(intInRange(needValue(i, "--polish-passes"), "--polish-passes", 0, 100)); opt.userSetPolishPasses = true; }
+        else if (a == "--aggressive") opt.mode = RunMode::Aggressive;
+        else if (a == "--mode") {
+            const std::string m = needValue(i, "--mode");
+            if (!parseRunMode(m, opt.mode)) {
+                std::fprintf(stderr,
+                             "error: unknown mode '%s' (expected fast, standard, careful or aggressive)\n",
+                             m.c_str());
+                return 1;
+            }
+        }
+        else if (a == "--max-memory") {
+            // Validated before the cast: atof() cannot report failure, and a
+            // value that overflows to inf makes the cast to long long undefined.
+            opt.maxMemoryBytes = static_cast<long long>(
+                numInRange(needValue(i, "--max-memory"), "--max-memory", 0.001, 1048576.0) *
+                1073741824.0);
+        }
+        else if (a == "--no-gfa") opt.emitGfa = false;
+        else if (a == "--no-html") opt.emitHtml = false;
+        else if (a == "--unitigs") opt.emitUnitigs = true;
+        else if (a == "--no-correct") opt.correctReads = false;
+        else if (a == "--no-qtrim") opt.qtrim.enabled = false;
+        else if (a == "--qtrim-quality") opt.qtrim.meanQuality = static_cast<int>(intInRange(needValue(i, "--qtrim-quality"), "--qtrim-quality", 0, 60));
+        else if (a == "--qtrim-window") opt.qtrim.windowSize = static_cast<int>(intInRange(needValue(i, "--qtrim-window"), "--qtrim-window", 1, 1000));
+        else if (a == "--no-resolve") opt.resolveRepeats = false;
+        else if (a == "--no-scaffold") opt.scaffold = false;
+        else if (a == "--no-gapfill") opt.gapFill = false;
+        else if (a == "--no-ladder-union") opt.ladderUnion = false;
+        else if (a == "--ladder-union") opt.ladderUnion = true;
+        else if (a == "--no-dedup-contained") opt.dedupContained = false;
+        else if (a == "--dedup-contained") opt.dedupContained = true;
+        else if (a == "--trim-overlap") opt.trimTerminalOverlap = static_cast<size_t>(intInRange(needValue(i, "--trim-overlap"), "--trim-overlap", 0, 100000));
+        else if (a == "--no-polish") opt.polish = false;
+        else if (a == "-t" || a == "--threads") opt.threads = static_cast<int>(intInRange(needValue(i, "-t"), "-t/--threads", 1, 4096));
+        else if (a == "-q" || a == "--quiet") opt.verbose = false;
+        else {
+            std::fprintf(stderr, "error: unknown option '%s'\nRun 'tesseract-asm --help' for usage.\n", a.c_str());
+            return 1;
+        }
+    }
+
+    // 1.5: the Model 2.0 organism-detection tokens are experimental. They are accepted only when
+    // TESSERACT_OM2_DETECT is set, so that without it the command line is 1.4.0's: --organism-force
+    // is an unknown option and `--organism auto` names a model file auto.tsm like any other name.
+    const bool detectCli = env::isSet("TESSERACT_OM2_DETECT");
+    if (organismForce && !detectCli) {
+        std::fprintf(stderr, "error: unknown option '--organism-force'\nRun 'tesseract-asm --help' for usage.\n");
+        return 1;
+    }
+    // Every TESSERACT_* flag is checked against its declared kind and range before any
+    // work starts, and each one that is set is recorded as "[config] NAME=<parsed value>".
+    // A malformed value (1e9 for an integer, "true" for a switch, -1 for a length) is a
+    // hard error here rather than a silent 0 an hour into the run.
+    if (env::validateEnvironment(stderr) != 0) return 2;
+    // N9: the gap-flank restore (T03) is only defined together with the polisher's N-skip (T02).
+    if (checkFixCoupling(stderr) != 0) return 2;
+    // 1.4.0 (RELEASE_PLAN step 3.3): the eight settings whose default changed, as this run
+    // resolves them -- defaults, environment and command line, --mode applied -- on every run.
+    {
+        AssemblyOptions effective = opt;
+        effective.applyMode();
+        std::fprintf(stderr, "%s\n", defaults::line(effective.tieRatio).c_str());
+    }
+
+    // Organism Model 2.0, C3 (default OFF): `--organism auto` picks the model from the reads, and
+    // TESSERACT_OM2_DETECT=warn|gate checks an explicit --organism against them (organism_detect.h).
+    // Skipped when an input is missing: the checks below report that.
+    if (detectCli && om2::detectRequested(opt.organism) && opt.organismModelPath.empty()) {
+        std::vector<std::string> files;
+        for (const std::string& f : {lib.r1, lib.r2}) if (!f.empty()) files.push_back(f);
+        for (const Library& sl : singles) files.push_back(sl.r1);
+        bool present = !files.empty();
+        for (const std::string& f : files) present = present && util::fileExists(f);
+        std::string dir;
+        if (const char* d = env::text("TESSERACT_MODEL_DIR")) dir = d;
+        else if (const char* h = std::getenv("HOME")) dir = std::string(h) + "/.tesseract/models";
+        if (present) {
+            const int rc = om2::detectOrganism(opt.organism, organismForce, files, dir, stderr);
+            if (rc != 0) return rc;
+        }
+    }
+
+    // --organism resolves to a bundled model. This is the only supported way to reach
+    // one: the model's value is in how its panel was assembled and what was withheld
+    // from it, none of which survives being pointed at an arbitrary file. Resolution
+    // matches tesseract-get-models' install location and tesseract-eskape's default, so
+    // the three cannot drift apart.
+    //
+    // The file is named by the canonical organism name (N22): `--organism klebsiella`, which
+    // the helpers passed and the 1.2 documentation taught, resolves to kpneumoniae.tsm -- the
+    // name tesseract-get-models, the installer and models.sha256 use. Until 1.4.0 it looked
+    // for klebsiella.tsm, which nothing installs.
+    if (!opt.organism.empty() && opt.organismModelPath.empty()) {
+        std::string dir;
+        if (const char* d = env::text("TESSERACT_MODEL_DIR")) {
+            dir = d;
+        } else if (const char* h = std::getenv("HOME")) {
+            dir = std::string(h) + "/.tesseract/models";
+        }
+        const std::string cand =
+            dir.empty() ? std::string() : dir + "/" + canonicalOrganism(opt.organism) + ".tsm";
+        if (!cand.empty() && util::fileExists(cand)) {
+            opt.organismModelPath = cand;
+        } else {
+            std::fprintf(stderr,
+                "error: no bundled model for organism '%s'.\n"
+                "  Looked for: %s\n"
+                "  Install the models once with:  tesseract-get-models\n"
+                "  Or point TESSERACT_MODEL_DIR at a directory holding them.\n"
+                "  Assembling without a model is fine -- omit --organism -- but the\n"
+                "  junctions no fragment spans will be left broken rather than joined.\n",
+                opt.organism.c_str(), cand.empty() ? "(no HOME or TESSERACT_MODEL_DIR)" : cand.c_str());
+            return 2;
+        }
+    }
+    // om2 C3: the detection sketch must come from the model file this run loads (EVAL_PLAN s2).
+    if (om2::checkSketchModel(opt.organismModelPath, stderr) != 0) return 2;
+
+    if (!haveLib || (lib.r1.empty() && singles.empty())) {
+        std::fprintf(stderr, "error: no input reads given (use -1/-2, --12, or -s)\n");
+        return 1;
+    }
+    if (lib.r1.empty() && !lib.r2.empty()) {
+        std::fprintf(stderr, "error: -2 given without -1\n");
+        return 1;
+    }
+    if (!lib.r1.empty()) opt.libraries.push_back(lib);
+    for (Library& sl : singles) opt.libraries.push_back(std::move(sl));
+    for (const Library& l : opt.libraries) {
+        for (const std::string& f : {l.r1, l.r2}) {
+            if (!f.empty() && !util::fileExists(f)) {
+                std::fprintf(stderr, "error: input file not found: %s\n", f.c_str());
+                return 1;
+            }
+        }
+    }
+    // The same file named twice loads its reads twice. As -1 and -2 every read became its
+    // own mate: the names agree, so the pairing check passed, R2 was never read and each
+    // R1 read counted double, which makes every error k-mer solid. Compared by device and
+    // inode, so a symlink or another spelling of the path is caught as well.
+    {
+        // opt.libraries holds the -1/-2/--12 library first (when there is one), then
+        // every -s library.
+        std::vector<std::pair<const char*, std::string>> inputs;
+        for (size_t li = 0; li < opt.libraries.size(); ++li) {
+            const Library& l = opt.libraries[li];
+            const bool fromPair = (li == 0 && !lib.r1.empty());
+            inputs.emplace_back(!fromPair ? "-s" : (l.interleaved ? "--12" : "-1"), l.r1);
+            if (!l.r2.empty()) inputs.emplace_back("-2", l.r2);
+        }
+        for (size_t x = 0; x < inputs.size(); ++x) {
+            for (size_t y = x + 1; y < inputs.size(); ++y) {
+                if (sameFile(inputs[x].second, inputs[y].second)) {
+                    std::fprintf(stderr, "error: %s %s and %s %s name the same file; its reads would be "
+                                         "loaded twice\n",
+                                 inputs[x].first, inputs[x].second.c_str(),
+                                 inputs[y].first, inputs[y].second.c_str());
+                    return 2;
+                }
+            }
+        }
+    }
+
+    opt.commandLine = invocation;
+    Assembler asmb(std::move(opt));
+    std::string error;
+    if (!asmb.run(error)) {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+
+    if (asmb.diagnosticBatchComplete()) return 0;
+
+    const AssemblyStats& st = asmb.stats();
+    const AssemblyReport& rep = asmb.report();
+    const int finalK = rep.iterations.empty() ? 0 : rep.iterations.back().k;
+
+    // Two rows when the assembly is scaffolded, never one. The records written to
+    // contigs.fasta are scaffolds: layout asserts an order across a gap and fills it with N,
+    // which raises N50 and `largest` without assembling another base. Split at those gaps and
+    // the contig figures are what QUAST, NCBI and every published comparison report -- here
+    // 35x lower on a real isolate. Printing only the scaffold row is how a layout change gets
+    // read as an assembly improvement, and it has already misled one comparison in this
+    // project, so the honest number is not left for the reader to derive.
+    const bool scaffolded = rep.scaffoldGaps > 0;
+    std::fprintf(stderr,
+                 "\n"
+                 "  %-12s %s\n"
+                 "  total length %s bp\n"
+                 "  largest      %s bp\n"
+                 "  N50          %s bp    N90 %s bp    L50 %s\n"
+                 "  GC           %.2f%%\n",
+                 scaffolded ? "scaffolds" : "contigs",
+                 util::commify(static_cast<long long>(st.contigs)).c_str(),
+                 util::commify(static_cast<long long>(st.totalLength)).c_str(),
+                 util::commify(static_cast<long long>(st.largest)).c_str(),
+                 util::commify(static_cast<long long>(st.n50)).c_str(),
+                 util::commify(static_cast<long long>(rep.n90)).c_str(),
+                 util::commify(static_cast<long long>(rep.l50)).c_str(),
+                 st.gcPercent);
+
+    if (scaffolded) {
+        // build_v3 (T17 hand-off from G-emit): these rows describe the records contigs.fasta
+        // holds -- the scaffolds split at EVERY N-run (report.json scaffold_gaps counts runs of
+        // any length) and after the terminal-overlap trim -- not a 10+ N split.
+        std::fprintf(stderr,
+                     "  -- as written to contigs.fasta (split at every N-run: %s gap%s; terminal overlaps trimmed):\n"
+                     "  contigs      %s\n"
+                     "  total length %s bp    (the rest is N)\n"
+                     "  largest      %s bp\n"
+                     "  N50          %s bp\n",
+                     util::commify(static_cast<long long>(rep.scaffoldGaps)).c_str(),
+                     rep.scaffoldGaps == 1 ? "" : "s",
+                     util::commify(static_cast<long long>(rep.contigPieces)).c_str(),
+                     util::commify(static_cast<long long>(rep.contigTotal)).c_str(),
+                     util::commify(static_cast<long long>(rep.contigLargest)).c_str(),
+                     util::commify(static_cast<long long>(rep.contigN50)).c_str());
+    }
+
+    // k-mer depth and read depth differ by a factor of L/(L-k+1); reporting one
+    // as "coverage" invites reading it as the other.
+    std::fprintf(stderr, "  k-mer depth  %.1fx (k=%d)\n", st.meanCoverage, finalK);
+    if (rep.polishRun && rep.polish.meanDepth > 0) {
+        std::fprintf(stderr, "  read depth   %.1fx (measured by mapping reads back)\n",
+                     rep.polish.meanDepth);
+    }
+    if (rep.gapBases) {
+        // rep.resolve.scaffoldJoins counts only the joins the read-pair resolve stage made,
+        // while gapBases sums the N from every stage that scaffolds -- layout included. Pairing
+        // them printed "0 joins spanning 97,073 N bases" on a real isolate: self-contradictory,
+        // and it hid the scaffolding entirely. The gap count now comes from the sequences.
+        std::fprintf(stderr, "  scaffold gaps %s joins spanning %s N bases\n",
+                     util::commify(static_cast<long long>(rep.scaffoldGaps)).c_str(),
+                     util::commify(static_cast<long long>(rep.gapBases)).c_str());
+    }
+    std::fprintf(stderr, "  %s %.1fs   %s %s\n",
+                 asmb.diagnosticForkChild() ? "post-graph elapsed" : "elapsed     ", st.seconds,
+                 asmb.diagnosticForkChild() ? "child peak memory" : "peak memory",
+                 util::humanBytes(static_cast<double>(util::peakMemoryBytes())).c_str());
+    return 0;
+}

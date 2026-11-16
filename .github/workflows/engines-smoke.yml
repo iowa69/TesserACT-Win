@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+#
+# Quick proof of the two engines on Windows: build them natively, run their self-tests,
+# trim and assemble the example, and require the same output as the Linux build.
+name: Engines smoke
+
+on:
+  push:
+    branches: ["build", "ci/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ make zlib1g-dev
+      - name: Build both engines
+        run: python engines/build.py --target linux --jobs 4
+      - name: Self-tests, trimming and assembly of the example
+        run: python engines/smoke.py run --engines build/engines/linux --out build/smoke-linux.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-linux
+          path: |
+            build/smoke-linux.json
+            build/engines/linux/BUILD_INFO.json
+            build/logs
+
+  windows:
+    runs-on: windows-2022
+    needs: linux
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-zlib
+            make
+            diffutils
+      - name: Build both engines natively
+        shell: msys2 {0}
+        run: |
+          g++ --version | head -1
+          python --version
+          python engines/build.py --target windows --jobs 4
+      - name: Self-tests, trimming and assembly of the example
+        shell: pwsh
+        run: python engines/smoke.py run --engines build/engines/windows --out build/smoke-windows.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-linux
+          path: build/linux
+      - name: Same output as Linux
+        shell: pwsh
+        run: python engines/smoke.py compare build/linux/smoke-linux.json build/smoke-windows.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-windows
+          path: |
+            build/smoke-windows.json
+            build/engines/windows/BUILD_INFO.json
+            build/engines/windows/*.exe
+            build/logs
+            build/smoke

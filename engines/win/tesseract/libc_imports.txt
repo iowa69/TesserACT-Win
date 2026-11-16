@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+#
+# C-library symbols (libc, libm, zlib, libgcc) that a Linux build of the staged TesserACT tree
+# imports. recipe.py (new_libc_imports, and "recipe.py check-imports PROGRAM") lists every import
+# of a new build that is NOT in this file: each is either harmless (add it here) or a new POSIX
+# or libm dependency that the Windows port must cover with a shim or assess (can a libm result
+# reach contigs.fasta? see section 6.2 of docs/superpowers/audits/engine-port.md).
+# The names depend on the C library and compiler version: this list was made with GCC 15.2 and
+# glibc on Ubuntu, so read a difference on another system with that in mind.
+#
+# --- imported by the pristine TesserACT 1.6.2 (audited release), 114 symbols
+_ITM_deregisterTMCloneTable
+_ITM_registerTMCloneTable
+_Unwind_Resume
+__cxa_atexit
+__cxa_begin_catch
+__cxa_end_catch
+__cxa_finalize
+__cxa_guard_abort
+__cxa_guard_acquire
+__cxa_guard_release
+__cxa_rethrow
+__cxa_throw_bad_array_new_length
+__errno_location
+__fprintf_chk
+__getdelim
+__gmon_start__
+__gxx_personality_v0
+__isoc23_fscanf
+__isoc23_strtol
+__isoc23_strtoll
+__isoc23_strtoul
+__isoc23_strtoull
+__libc_start_main
+__memcpy_chk
+__printf_chk
+__realpath_chk
+__snprintf_chk
+__stack_chk_fail
+_exit
+abort
+close
+closedir
+dup2
+exit
+exp
+fclose
+feof
+ferror
+fflush
+fgets
+fopen
+fork
+fputc
+fread
+free
+fseek
+ftell
+fwrite
+getenv
+getpid
+getppid
+getrusage
+gzbuffer
+gzclose
+gzerror
+gzgets
+gzopen
+gzread
+isalnum
+isspace
+kill
+localtime_r
+log
+log10
+lround
+lroundf
+lstat
+memchr
+memcmp
+memcpy
+memmove
+memset
+mkdir
+nanosleep
+open
+open_memstream
+opendir
+pclose
+popen
+pow
+prctl
+pthread_mutex_lock
+pthread_mutex_unlock
+readdir
+readlink
+remove
+rename
+setenv
+setvbuf
+sigaction
+sigaddset
+sigemptyset
+sigismember
+sigprocmask
+sin
+sqrt
+stat
+strchr
+strcmp
+strerror
+strftime
+strlen
+strncmp
+strtod
+sysconf
+time
+tolower
+toupper
+unlink
+unsetenv
+wait4
+waitpid
+write
+zlibVersion
+# --- added by the port: the LLP64 rewrite (lround -> llround) ...
+llround
+llroundf
+# ... and the self-test of the compatibility layer (ts_selftest.cpp, ts_compat.cpp)
+_Exit
+fgetc
+fputs
+ftruncate
+gzwrite
+malloc
+rmdir

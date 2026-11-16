@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# tesseract-get-models -- download the organism models and check they arrived intact.
+# Users call it as `tesseract models download|list`; it is installed in libexec/tesseract.
+#
+# Models are release assets, not part of the source tree: the eight total about 1.7 GB
+# and do not belong in a git history. 1.5.0 added senterica.tsm to the same models-v2 release:
+# the seven ESKAPEE files are unchanged, so a 1.4.0 install (whose models.sha256 lists only
+# those seven) still verifies everything it fetches, and never asks for the eighth. This fetches them, verifies each against a
+# checksum, and puts them where --organism looks by default.
+#
+# Written to be safe to re-run: an already-verified model is skipped, and a download that fails
+# verification is deleted rather than left in place, because a truncated model file produces a
+# confusing error much later in an assembly rather than an obvious one now.
+set -euo pipefail
+
+BASE="${TESSERACT_MODEL_URL:-https://github.com/iowa69/TesserACT/releases/download/models-v2}"
+DEST="${TESSERACT_MODEL_DIR:-$HOME/.tesseract/models}"
+MANIFEST_LOCAL="$(dirname "$0")/models.sha256"
+
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'tesseract models: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+cat <<'USAGE'
+tesseract models -- fetch the organism models
+
+  tesseract models download              download every model
+  tesseract models download saureus      download just one (several names are fine)
+  tesseract models list                  show what is available and what you already have
+  tesseract models download --dir PATH   put them somewhere else
+
+They go to ~/.tesseract/models by default, which is where --organism looks (TESSERACT_MODEL_DIR
+moves it). About 1.7 GB for all eight (64 to 349 MB each). Re-running is safe: anything
+already verified is skipped.
+
+Models are optional: tesseract assembles without them. With --organism, the chromosome is laid
+out from the conserved gene order of thousands of closed genomes of that species: more
+contiguous, at some risk of joins that were seen in other genomes rather than in your reads.
+USAGE
+}
+
+ONLY=(); 
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --list) LIST=1; shift ;;
+        --dir) [ "$#" -ge 2 ] || die "--dir needs a path"; DEST="$2"; shift 2 ;;
+        --dir=*) DEST="${1#*=}"; shift ;;
+        -*) die "unknown option: $1 (try --help)" ;;
+        *) ONLY+=("$1"); shift ;;
+    esac
+done
+
+command -v curl >/dev/null 2>&1 || die "curl is not installed. On Ubuntu: sudo apt install curl"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is not installed."
+[ -r "$MANIFEST_LOCAL" ] || die "cannot read the checksum list next to this script: $MANIFEST_LOCAL"
+
+mkdir -p "$DEST" || die "cannot create $DEST"
+
+verify() {  # verify FILE EXPECTED_SHA -> 0 if it matches
+    local got
+    got=$(sha256sum "$1" | cut -d' ' -f1)
+    [ "$got" = "$2" ]
+}
+
+n_ok=0; n_get=0; n_fail=0; n_404=0
+while read -r sha name; do
+    [ -n "${sha:-}" ] || continue
+    case "$sha" in \#*) continue ;; esac
+    if [ "${#ONLY[@]}" -gt 0 ]; then
+        want=0
+        for o in "${ONLY[@]}"; do case "$name" in "$o"*|"$o".tsm) want=1 ;; esac; done
+        [ "$want" = 1 ] || continue
+    fi
+    target="$DEST/$name"
+    if [ -s "$target" ] && verify "$target" "$sha"; then
+        say "  have  $name"; n_ok=$((n_ok+1)); continue
+    fi
+    if [ "${LIST:-0}" = 1 ]; then say "  need  $name"; continue
+    fi
+    say "  get   $name ..."
+    # The HTTP status is kept, not just curl's exit code, because 404 and "the network went
+    # away" need opposite advice. A missing release asset is never fixed by retrying, and
+    # telling someone to retry it sends them round a loop that cannot terminate.
+    http=$(curl -fL --retry 3 --retry-delay 5 -o "$target.part" -w '%{http_code}' "$BASE/$name") || true
+    if [ "${http:-000}" != 200 ]; then
+        rm -f "$target.part"; n_fail=$((n_fail+1))
+        case "${http:-000}" in
+            404) say "        not on the release page (HTTP 404)"; n_404=$((n_404+1)) ;;
+            000) say "        download failed - could not reach $BASE" ;;
+            *)   say "        download failed (HTTP $http)" ;;
+        esac
+        continue
+    fi
+    if verify "$target.part" "$sha"; then
+        mv "$target.part" "$target"; n_get=$((n_get+1))
+    else
+        say "        checksum did not match - discarding (the file was corrupt or truncated)"
+        rm -f "$target.part"; n_fail=$((n_fail+1))
+    fi
+done < "$MANIFEST_LOCAL"
+
+if [ "${LIST:-0}" = 1 ]; then exit 0; fi
+say ""
+say "Models in $DEST: $((n_ok + n_get)) ready${n_fail:+, $n_fail failed}"
+if [ "$n_404" -gt 0 ]; then
+    say ""
+    say "$n_404 model(s) are not on the release page at:"
+    say "    $BASE"
+    say "That is a publishing gap on our side, not a fault on this machine, and retrying"
+    say "will not fix it. tesseract works without them: run it without --organism, or point"
+    say "TESSERACT_MODEL_DIR at a copy if you have one:"
+    say "    export TESSERACT_MODEL_DIR=/path/to/models"
+    exit 1
+fi
+[ "$n_fail" -gt 0 ] && die "some models did not download. Re-run to retry just those."
+say "You can now run, for example:"
+say "    tesseract -1 reads_R1.fastq.gz -2 reads_R2.fastq.gz -o result --organism saureus"

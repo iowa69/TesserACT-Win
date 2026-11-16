@@ -1,0 +1,52 @@
+TesserACT-Win
+Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+Licensed under the MIT licence (see LICENSE).
+
+The downloadable program contains the following third-party software.
+
+TesserACT (the assembler, engines\tesseract-asm.exe)
+  Copyright (c) 2026 The TesserACT authors. MIT licence.
+  https://github.com/iowa69/TesserACT
+  Source as built: engines/tesseract/upstream in this repository, unmodified, with the
+  Windows compatibility layer in engines/win/tesseract.
+
+scepter (the read trimmer, engines\scepter.exe)
+  Copyright (c) 2026 The scepter authors. MIT licence.
+  Source as built: engines/scepter/upstream in this repository, unmodified, with the
+  Windows compatibility layer in engines/win/scepter.
+
+zlib (linked into both engines)
+  Copyright (c) 1995-2024 Jean-loup Gailly and Mark Adler. zlib licence.
+  https://zlib.net
+
+GCC runtime libraries, libstdc++ and libgcc (linked into both engines)
+  Copyright (c) Free Software Foundation, Inc. GPL-3.0-or-later with the GCC Runtime
+  Library Exception, which permits distributing programs built with GCC under any licence.
+  https://gcc.gnu.org
+
+MinGW-w64 runtime and winpthreads (linked into both engines)
+  Copyright (c) the mingw-w64 project. Zope Public License 2.1, public domain and
+  MIT/BSD-style licences as stated in their sources.
+  https://www.mingw-w64.org
+
+Python (the interpreter and standard library inside the _internal folder)
+  Copyright (c) 2001 Python Software Foundation. Python Software Foundation License.
+  https://www.python.org
+
+Tcl/Tk (the window toolkit, inside the _internal folder)
+  Copyright (c) Regents of the University of California, Sun Microsystems, Inc.,
+  Scriptics Corporation and other parties. Tcl/Tk licence (BSD-style).
+  https://www.tcl-lang.org
+
+PyInstaller bootloader (TesserACT-Win.exe starts through it)
+  Copyright (c) 2010-2026 PyInstaller Development Team. GPL-2.0-or-later with a special
+  exception that permits distributing the bundled program under any licence.
+  https://pyinstaller.org
+
+tkinterdnd2 and tkdnd (drag and drop, when present in the _internal folder)
+  tkinterdnd2: Copyright (c) petasis, pmgagne, Eliav2 and contributors. MIT licence.
+  tkdnd: Copyright (c) George Petasis and contributors. BSD-style licence.
+  https://github.com/Eliav2/tkinterdnd2
+
+The example reads in the example folder are synthetic: a made-up sequence produced by
+tools/make_example.py. They are not derived from any organism or data set.
