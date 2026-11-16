@@ -627,6 +627,16 @@ class HelpLine(ttk.Frame):
         self.bind("<Destroy>", self._forget_timer, add="+")
         self._refresh()
 
+    def set_lines(self, lines: int) -> None:
+        """Change the fixed height: how many lines of text the line has room for."""
+        lines = max(1, int(lines))
+        if lines == self._lines:
+            return
+        self._lines = lines
+        look = self._look
+        self.configure(height=lines * int(look.font("body").metrics("linespace")) + look.px(4))
+        self._refresh()
+
     # -- what speaks
     def set_default(self, text: str) -> None:
         self._default = text
@@ -2360,7 +2370,12 @@ class NoticeBar(ttk.Frame):
         super().__init__(parent, **options)
         self.columnconfigure(0, weight=1)
         self._bars: Dict[str, Dict[str, Any]] = {}
-        self._rows = 0
+        self._rows = 1
+        # A frame whose last child is taken away keeps the height that child gave it (Tk does
+        # not work a grid out again once it is empty), which left a blank band where a bar had
+        # been. This one-pixel floor in row 0 is always there, so the grid is never empty.
+        self._floor = ttk.Frame(self, style=options["style"], height=1, width=1)
+        self._floor.grid(row=0, column=0, sticky="ew")
 
     def show(self, kind: str, text: str, level: str = "warn", *,
              actions: Sequence[Tuple[str, Callable[[], Any]]] = (), dismissible: bool = True,

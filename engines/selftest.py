@@ -99,11 +99,17 @@ def ask(program: str, variable: str) -> dict:
         except OSError as exc:
             status, out, err = 127, b"", ("cannot be started: %s\n" % (exc.strerror or exc)).encode()
     answers: List[Tuple[str, str]] = []
+    other: List[str] = []
     for line in out.decode("utf-8", "replace").replace("\r\n", "\n").split("\n"):
         if "=" in line and not line.startswith((" ", "\t", "#", "[")):
             key, value = line.split("=", 1)
             answers.append((key.strip(), value.strip()))
+        elif line.strip():
+            other.append(line.rstrip())
     notes = [line for line in err.decode("utf-8", "replace").replace("\r\n", "\n").split("\n") if line.strip()]
+    # What a program printed that is no answer (a crash message, the help of a program that
+    # has no self-test) is kept as well: it is all there is to explain a failure.
+    notes += ["(printed) " + line for line in other[-30:]]
     return {"exit": status, "answers": answers, "notes": notes}
 
 
@@ -133,6 +139,9 @@ def render(results: Dict[str, dict]) -> str:
 
 def cmd_run(args) -> int:
     folder = os.path.abspath(args.engines)
+    out = os.path.abspath(args.out)
+    if os.path.isfile(out):             # answers of an earlier run must not pass for these
+        os.remove(out)
     suffix = ".exe" if os.name == "nt" else ""
     results: Dict[str, dict] = {}
     failed: List[str] = []
@@ -150,7 +159,6 @@ def cmd_run(args) -> int:
                 say("    %s=%s" % (key, value))
             for note in results[engine]["notes"]:
                 say("    # " + note)
-    out = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(render(results))
@@ -215,6 +223,10 @@ def cmd_compare(args) -> int:
         a, b = parse(args.linux_file), parse(args.windows_file)
     except OSError as exc:
         sys.stderr.write("selftest: cannot read %s: %s\n" % (exc.filename, exc.strerror))
+        return 1
+    except ValueError as exc:           # not UTF-8: not a file that "run" wrote
+        sys.stderr.write("selftest: %s or %s is not a file written by 'selftest.py run' (%s)\n"
+                         % (args.linux_file, args.windows_file, exc))
         return 1
     problems, compared, left_out = compare_answers(a, b, args.linux_file, args.windows_file)
     if problems:

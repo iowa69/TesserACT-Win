@@ -31,6 +31,8 @@
 #   SUITES_JOBS   compile jobs for the C++ tests    (default 4)
 #   SUITES_ONLY   run only these suites, comma separated (for example "scepter-e2e,scepter-flags")
 #   SUITES_KEEP   1 keeps the working folder and the built C++ test programs
+#   SUITES_WORK   working folder, deleted first  (default build/upstream-suites/<platform>)
+#   SUITES_LOG_DIR  where the output is kept, deleted first  (default build/logs/upstream-suites-<platform>)
 #   SUITES_NO_INSTALL  1: on Windows, do not install the MSYS2 python package when it is missing
 
 set -u
@@ -44,11 +46,13 @@ esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 ENGINES_DIR="${ENGINES_DIR:-$REPO/build/engines/$PLATFORM}"
+[ -d "$ENGINES_DIR" ] && ENGINES_DIR="$(cd "$ENGINES_DIR" && pwd)"
 STAGE="$REPO/build/stage/$PLATFORM"
-WORK="$REPO/build/upstream-suites/$PLATFORM"
-LOGS="$REPO/build/logs/upstream-suites-$PLATFORM"
+WORK="${SUITES_WORK:-$REPO/build/upstream-suites/$PLATFORM}"
+LOGS="${SUITES_LOG_DIR:-$REPO/build/logs/upstream-suites-$PLATFORM}"
 JOBS="${SUITES_JOBS:-4}"
 ONLY="${SUITES_ONLY:-}"
+ONLY="${ONLY//[[:space:]]/}"          # "a, b" means "a,b"
 EXPECTED_FAIL="$HERE/expected-fail-windows.txt"
 EXE=""
 [ "$PLATFORM" = windows ] && EXE=".exe"
@@ -107,8 +111,25 @@ for tool in timeout mktemp md5sum sha256sum cmp diff awk sed grep sort head wc t
 done
 
 # ----------------------------------------------------------------------------- working folders
+# Both folders are deleted before the run (and the working folder after it): refuse a
+# setting that would take the project, the programs, the staged source or the logs with it.
+canonical() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
+WORK_REAL="$(canonical "$WORK")"
+LOGS_REAL="$(canonical "$LOGS")"
+for doomed in "$WORK_REAL" "$LOGS_REAL"; do
+    [ "$doomed" != / ] || die "refusing to delete / (SUITES_WORK or SUITES_LOG_DIR)"
+    for kept in "$REPO" "$REPO/build" "$REPO/build/logs" "$REPO/build/engines" "$STAGE" "$ENGINES_DIR" "${HOME:-$REPO}"; do
+        case "$(canonical "$kept")/" in
+            "$doomed"/*) die "refusing to use $doomed as a working or log folder: it is deleted first, and it is or holds $kept. Set SUITES_WORK and SUITES_LOG_DIR to folders of their own." ;;
+        esac
+    done
+done
+case "$LOGS_REAL/" in "$WORK_REAL"/*) die "SUITES_LOG_DIR ($LOGS) lies inside SUITES_WORK ($WORK), which is deleted at the end: the logs would be lost." ;; esac
+case "$WORK_REAL/" in "$LOGS_REAL"/*) die "SUITES_WORK ($WORK) lies inside SUITES_LOG_DIR ($LOGS): give each a folder of its own." ;; esac
 rm -rf "$WORK" "$LOGS"
 mkdir -p "$WORK/tmp" "$WORK/bin" "$LOGS"
+WORK="$(cd "$WORK" && pwd)"
+LOGS="$(cd "$LOGS" && pwd)"
 export TMPDIR="$WORK/tmp"
 if [ "$PLATFORM" = windows ]; then
     # "python3" for every suite is the MSYS2 one, whatever comes first on PATH.
@@ -257,6 +278,7 @@ if wanted tesseract-cpp; then
     done
     built="$(tr -d '\r' < "$LOGS/tesseract-cpp.log" | grep -E '^built [0-9]+, failed [0-9]+, skipped [0-9]+' | tail -1)"
     ran="$(tr -d '\r' < "$LOGS/tesseract-cpp.log" | grep -E '^ran [0-9]+, passed [0-9]+' | tail -1)"
+    case "$ran" in "ran 0,"*) ran="" ;; esac       # no program was run: nothing was proven
     if [ $status -eq 0 ] && [ -n "$ran" ]; then
         note tesseract-cpp "passed" "${built%% (*}; $ran" "$LOGS/tesseract-cpp.log"
     else
@@ -305,7 +327,10 @@ if [ "$PLATFORM" = windows ]; then
         done
     fi
 fi
-[ "${SUITES_KEEP:-0}" = 1 ] || rm -rf "$WORK"
+if [ "${SUITES_KEEP:-0}" != 1 ]; then
+    rm -rf "$WORK"
+    rmdir "$(dirname "$WORK")" 2>/dev/null || true
+fi
 
 # ----------------------------------------------------------------------------- summary
 {

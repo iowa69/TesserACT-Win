@@ -32,7 +32,8 @@ __all__ = [
     "number", "count", "minutes", "STEPS", "STEP_LABEL", "STEP_STANDARD", "STEP_CHANGED",
     "STEP_NO_TRIMMING", "STEP_NO_SAMPLES", "STEP_RUNNING", "STEP_FINISHED", "STEP_STOPPED",
     "PAGE_TITLE", "PAGE_INTRO", "FIRST_TIME_HINT", "BUTTON", "SAMPLES_COLUMNS", "RUN_COLUMNS",
-    "EMPTY_STATE", "EMPTY_STATE_NO_DROP", "EMPTY_STATE_LINK_LEAD", "EXAMPLE_NOTE", "MORE_LANES",
+    "EMPTY_STATE", "EMPTY_STATE_NO_DROP", "EMPTY_STATE_LINK_LEAD", "EXAMPLE_NOTE", "EXAMPLE_SIZE_NOTE",
+    "MORE_LANES", "more_lanes",
     "RESULTS_FOLDER_LABEL", "RESULTS_FOLDER_NOTE", "RESULTS_FOLDER_SUGGESTED", "TRIMMING_LABEL",
     "TRIM_LABEL", "TRIM_SUFFIX", "TRIM_HOVER", "NO_TRIMMING_NOTICE", "ASSEMBLY_LABEL",
     "ASSEMBLY_SUFFIX", "ASSEMBLY_HOVER", "MODE_LABEL", "MODE_HOVER", "HOVER",
@@ -189,7 +190,18 @@ EMPTY_STATE_NO_DROP = ("Use Add files or Add folder to choose your FASTQ files. 
 EMPTY_STATE_LINK_LEAD = "No data at hand?"
 EXAMPLE_NOTE = ("This is a small practice sample. Press Start to see how a run looks. "
                 "It takes about a minute.")
+#: On the Assembly step while the genome size is ticked for the practice sample, and in the
+#: help line when it is loaded: a setting is never changed without saying so.
+EXAMPLE_SIZE_NOTE = ("The practice sample has a tiny genome, so the genome size is set to 0.2 Mb "
+                     "for it. The standard comes back when the practice sample leaves the list.")
 MORE_LANES = "(+{n} lanes)"
+
+
+def more_lanes(extra: int) -> str:
+    """Beside the name of the first read file of a sample in several lanes: "(+1 lane)", "(+7 lanes)"."""
+    if extra <= 0:
+        return ""
+    return "(+1 lane)" if extra == 1 else MORE_LANES.format(n=number(extra))
 
 RESULTS_FOLDER_LABEL = "Results folder"
 RESULTS_FOLDER_NOTE = "Each sample gets its own folder here."
@@ -703,8 +715,8 @@ def stop_question(sample: str, status: RunStatus, seconds: float, finished: int)
 
 def close_question(sample: str, status: RunStatus, seconds: float, finished: int) -> Question:
     """Closing the window during a run. Keys: ``"keep"`` (default, also Esc), ``"stop_and_close"``."""
-    kept = ("The %s are kept, and you can continue later." % (
-        "1 finished sample" if finished == 1 else "%s finished samples" % number(finished))
+    kept = ("The %s kept, and you can continue later." % (
+        "1 finished sample is" if finished == 1 else "%s finished samples are" % number(finished))
         if finished > 0 else "You can continue later.")
     body = ("A run is in progress. Closing the program stops it.\n"
             "%s %s (%s so far); that work would be lost.\n%s"
@@ -730,7 +742,8 @@ def overwrite_question(existing: int, total: int, different: int = 0, settings_s
     different_line = ""
     if different > 0:
         made = "It was" if existing == 1 else (
-            "All of them were" if different >= existing else "%s of them were" % number(different))
+            "All of them were" if different >= existing else
+            "1 of them was" if different == 1 else "%s of them were" % number(different))
         different_line = "\n%s made with different settings%s." % (
             made, " (%s)" % settings_summary if settings_summary else "")
     if existing >= total:

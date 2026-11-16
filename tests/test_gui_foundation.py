@@ -1652,7 +1652,8 @@ def test_notice_bar(win):
     assert bars._bars["resume"]["close"] is None                   # not dismissible: no close button
     bars.clear()
     win.pump()
-    assert bars.kinds() == [] and bars.winfo_children() == []
+    assert bars.kinds() == [] and bars.winfo_children() == [bars._floor]     # the floor alone: one pixel
+    assert bars.winfo_reqheight() <= 1                           # a bar that goes takes its room with it
 
 
 @pytest.mark.gui

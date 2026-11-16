@@ -20,7 +20,9 @@ assembles the trimmed reads and, separately, the raw reads with the settings pro
 the Ubuntu ``tesseract`` command, including its second attempt for thin data. It records
 a checksum of every output file that does not depend on the run: the decompressed
 trimmed reads, the trimming report without its run-specific fields, and the assembly
-files listed in ``DETERMINISTIC_FILES``.
+files listed in ``DETERMINISTIC_FILES``. The record is written whole at the end; a record
+of an earlier run at the same place is removed first, so a run that is stopped leaves
+none. Each run works in a folder of its own unless ``--work`` names one.
 
 ``compare`` requires two such records (one made on Linux, one on Windows) to agree in
 every checksum. It prints every difference and exits 1, or says how many files were
@@ -35,6 +37,7 @@ import argparse
 import fnmatch
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import random
@@ -43,6 +46,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import zlib
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -160,21 +164,28 @@ def write_gz(path: str, data: bytes) -> None:
 
 
 def write_json(path: str, data: dict) -> None:
+    """Write ``path`` whole or not at all: an interrupted write leaves no half record."""
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    partial = str(path) + ".part"
+    with open(partial, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(data, handle, indent=2, sort_keys=True, ensure_ascii=False)
         handle.write("\n")
+    os.replace(partial, path)
 
 
 def read_json(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            data = json.load(handle)
     except OSError as exc:
         raise Problem("cannot read %s: %s" % (path, exc.strerror or exc))
     except ValueError as exc:
         raise Problem("%s is not a readable record (%s). Make it again." % (path, exc))
+    if not isinstance(data, dict) or not isinstance(data.get("sets", {}), dict):
+        raise Problem("%s is not a readable record (it does not hold what this script writes). Make it again."
+                      % path)
+    return data
 
 
 def exe(folder: str, name: str) -> str:
@@ -344,7 +355,7 @@ def _set_example(tmp: str, out1: str, out2: str) -> None:
     shutil.move(os.path.join(tmp, "Example_isolate_R2.fastq.gz"), out2)
 
 
-#: name -> (maker, file stem, what it is). The order is the order of the run.
+#: name -> (maker, file stem, what it is). "run" takes the sets in alphabetical order.
 SYNTHETIC_SETS = {
     "plain200k": (_set_plain200k, "plain200k",
                   "one 200 kb chromosome, 60 times deep, 0.5% errors (engine audit, set d1)"),
@@ -468,8 +479,8 @@ def _download(url: str, target: str, size: int, checksum: str, attempts: int = 4
             else:
                 os.replace(partial, target)
                 return
-        except (OSError, ValueError) as exc:
-            last = str(exc)
+        except (OSError, ValueError, http.client.HTTPException) as exc:     # also a transfer cut short
+            last = str(exc) or type(exc).__name__
         say("  attempt %d of %d failed: %s" % (attempt, attempts, last))
         time.sleep(5 * attempt)
     if os.path.exists(partial):
@@ -688,6 +699,11 @@ def _version_line(program: str, word: str) -> str:
 def cmd_run(args) -> int:
     corpus = os.path.abspath(args.dir)
     engines = os.path.abspath(args.engines)
+    # A record left by an earlier run must not pass for the result of this one, should this
+    # one be stopped or fail before it writes its own.
+    for stale in (args.out, str(args.out) + ".part"):
+        if os.path.isfile(stale):
+            os.remove(stale)
     asm, scepter = exe(engines, "tesseract-asm"), exe(engines, "scepter")
     sketch = os.path.join(engines, "om2detect.sketch")
     for program in (asm, scepter):
@@ -696,11 +712,14 @@ def cmd_run(args) -> int:
     manifest = load_manifest(corpus)
     names = _chosen(args.sets, manifest["sets"])
     threads = max(1, args.threads or os.cpu_count() or 1)
-    work = os.path.abspath(args.work or os.path.join(REPO, "build", "equivalence-work"))
+    # A folder of this run's own unless one is given: two runs at the same time (two engine
+    # folders being compared, say) must never read each other's files.
+    own_work = os.path.join(REPO, "build", "equivalence-work", "run-%d" % os.getpid())
+    work = os.path.abspath(args.work or own_work)
     record = {
         "format": FORMAT, "platform": sys.platform, "threads": threads,
         "versions": {"tesseract-asm": _version_line(asm, "TesserACT"), "scepter": _version_line(scepter, "scepter")},
-        "detect_sketch": sha256_bytes(open(sketch, "rb").read()) if os.path.isfile(sketch) else None,
+        "detect_sketch": _file_facts(sketch)["sha256"] if os.path.isfile(sketch) else None,
         "sets": {},
     }
     say("tesseract-asm  %s" % record["versions"]["tesseract-asm"])
@@ -709,7 +728,9 @@ def cmd_run(args) -> int:
     ok = True
     for name in names:
         entry = manifest["sets"][name]
-        read1, read2 = os.path.join(corpus, entry["R1"]), os.path.join(corpus, entry["R2"])
+        # normpath: the manifest writes "/" on every platform, the engines get the native spelling
+        read1 = os.path.normpath(os.path.join(corpus, entry["R1"]))
+        read2 = os.path.normpath(os.path.join(corpus, entry["R2"]))
         folder = os.path.join(work, name)
         say("%s (%d read pairs)" % (name, entry["pairs"]))
         result: dict = {"input": {}, "problems": []}
@@ -718,7 +739,11 @@ def cmd_run(args) -> int:
             if not os.path.isfile(path):
                 result["problems"].append("%s is missing" % entry[mate])
                 continue
-            result["input"][mate] = reads_digest(path)[0]
+            try:
+                result["input"][mate] = reads_digest(path)[0]
+            except (OSError, EOFError, zlib.error) as exc:      # cut short, or not gzip at all
+                result["problems"].append("%s cannot be read (%s): make the read sets again" % (entry[mate], exc))
+                continue
             if result["input"][mate] != entry["sha256"][mate]:
                 result["problems"].append("%s is not the file the read sets were made with" % entry[mate])
         if result["problems"]:
@@ -754,6 +779,12 @@ def cmd_run(args) -> int:
                        ", second attempt with k = %s" % RETRY_KMERS if done["retried"] else "", done["seconds"]))
         if not args.keep:
             remove_tree(folder)
+    if not args.keep and not args.work:
+        remove_tree(work)
+        try:
+            os.rmdir(os.path.dirname(work))         # build/equivalence-work, when no other run is using it
+        except OSError:
+            pass
     record["ok"] = ok
     write_json(args.out, record)
     say("%s: %s" % ("recorded" if ok else "FAILED (see above); partial record", args.out))
@@ -811,6 +842,8 @@ def compare_records(a: dict, b: dict, name_a: str = "A", name_b: str = "B") -> T
         elif ra.get("sha256"):
             compared += 1
         differ("%s: run-specific fields missing from the trimming report" % name, ra.get("missing"), rb.get("missing"))
+        differ("%s: whether the trimming report in HTML was written" % name, ta.get("html_written"),
+               tb.get("html_written"))
 
         for what in sorted(set(sa.get("assembly", {})) | set(sb.get("assembly", {}))):
             xa, xb = sa.get("assembly", {}).get(what, {}), sb.get("assembly", {}).get(what, {})
@@ -836,6 +869,8 @@ def compare_records(a: dict, b: dict, name_a: str = "A", name_b: str = "B") -> T
                 problems.append("%s: the first contigs differ:\n    %s: %s\n    %s: %s"
                                 % (label, name_a, "; ".join(xa.get("first_headers", [])[:4]),
                                    name_b, "; ".join(xb.get("first_headers", [])[:4])))
+    if compared == 0 and not problems:
+        problems.append("the two records hold no checksum to compare: nothing was compared")
     return problems, compared
 
 
@@ -868,7 +903,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run.add_argument("--engines", required=True, help="folder with tesseract-asm, scepter and om2detect.sketch")
     run.add_argument("--out", required=True, help="the record to write (JSON)")
     run.add_argument("--threads", type=int, default=0, help="assembler threads (default: every core)")
-    run.add_argument("--work", default=None, help="working folder (default build/equivalence-work)")
+    run.add_argument("--work", default=None, help="working folder (default: one of this run's own under "
+                                                  "build/equivalence-work, removed afterwards)")
     run.add_argument("--sets", default=None, help="only these sets, separated by commas")
     run.add_argument("--keep", action="store_true", help="keep what the engines wrote")
     compare = sub.add_parser("compare", help="require two records to agree")

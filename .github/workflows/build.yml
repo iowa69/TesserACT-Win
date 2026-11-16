@@ -1,0 +1,258 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+#
+# Builds TesserACT-Win and proves it, on every push.
+#
+#   linux    builds both engines from the pinned source with the Windows changes applied,
+#            runs their own test suites and the program's tests, and records what the
+#            engines produce on a fixed set of reads.
+#   windows  builds both engines natively, runs the same suites, and requires their output
+#            on the same reads to be identical to Linux, byte for byte. Then it freezes the
+#            program, runs the frozen program end to end from a folder with spaces and
+#            accents in its name, takes screenshots, and makes the zip.
+#   release  on a tag v*, publishes the zip and its checksums.
+#
+# The build log of a release is its provenance record: the binaries are not code-signed.
+
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      real_isolate:
+        description: "Also compare Linux and Windows on a real public isolate (slower)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  # A real isolate is compared on tags and on manual runs; pushes use the synthetic sets only.
+  REAL_ISOLATE: ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.real_isolate)) && '1' || '0' }}
+
+jobs:
+  # -------------------------------------------------------------------------------------
+  linux:
+    name: Linux reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ make zlib1g-dev xvfb tk
+          python -m pip install --upgrade pip
+          python -m pip install pytest pillow
+
+      - name: Build both engines from the pinned source
+        run: python engines/build.py --target linux --jobs 4
+
+      - name: Engine self-tests
+        run: python engines/selftest.py run --engines build/engines/linux --out build/selftest-linux.txt
+
+      - name: The engines' own test suites, on the transformed source
+        run: bash engines/ci/run_upstream_suites.sh linux
+
+      - name: The port of the tesseract script still matches the real script
+        run: python -m pytest -q -m parity
+
+      - name: Program tests
+        run: xvfb-run -a python -m pytest -q -m "not parity"
+
+      - name: Reads for the Linux/Windows comparison
+        run: python engines/equivalence.py make-corpus build/corpus
+
+      - name: Real isolate for the comparison
+        if: env.REAL_ISOLATE == '1'
+        run: python engines/equivalence.py fetch-real build/corpus
+
+      - name: What the Linux engines produce
+        run: python engines/equivalence.py run build/corpus --engines build/engines/linux --out build/equivalence-linux.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-reference
+          retention-days: 14
+          path: |
+            build/equivalence-linux.json
+            build/selftest-linux.txt
+            build/engines/linux/BUILD_INFO.json
+
+      # The same read files are used on Windows, so the comparison cannot be blurred by
+      # two machines generating them separately.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comparison-reads
+          retention-days: 3
+          compression-level: 0
+          path: build/corpus
+
+  # -------------------------------------------------------------------------------------
+  windows:
+    name: Windows build, proof and package
+    runs-on: windows-2022
+    needs: linux
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-zlib
+            make
+            diffutils
+
+      - name: Build both engines natively
+        shell: msys2 {0}
+        run: python engines/build.py --target windows --jobs 4
+
+      - name: Engine self-tests
+        run: python engines/selftest.py run --engines build/engines/windows --out build/selftest-windows.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-reference
+          path: build/linux-reference
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: comparison-reads
+          path: build/corpus
+
+      - name: Self-tests agree with Linux
+        run: python engines/selftest.py compare build/linux-reference/selftest-linux.txt build/selftest-windows.txt
+
+      - name: The engines' own test suites, on Windows
+        shell: msys2 {0}
+        run: bash engines/ci/run_upstream_suites.sh windows
+
+      - name: Same output as Linux, byte for byte
+        run: |
+          python engines/equivalence.py run build/corpus --engines build/engines/windows --out build/equivalence-windows.json
+          python engines/equivalence.py compare build/linux-reference/equivalence-linux.json build/equivalence-windows.json
+
+      - name: Program tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pillow "pyinstaller==6.22.3" "tkinterdnd2==0.4.3"
+          python -m pytest -q -m "not parity"
+
+      - name: Freeze the program and make the zip
+        run: |
+          python packaging/make_build_files.py
+          pyinstaller --noconfirm --clean --distpath dist --workpath build/pyinstaller packaging/tesseract_win.spec
+          python packaging/assemble_dist.py
+
+      - name: The frozen program runs the example, from a folder with spaces and accents
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "Prova à côté"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Expand-Archive -Path (Get-ChildItem release\*.zip).FullName -DestinationPath $work
+          $exe = Join-Path $work "TesserACT-Win\TesserACT-Win.exe"
+          $report = Join-Path $work "selftest.txt"
+          $results = Join-Path $work "Risultati di prova"
+          $p = Start-Process -FilePath $exe -ArgumentList @("--self-test", "--full", "--report", "`"$report`"", "--work", "`"$results`"") -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report -Encoding utf8 }
+          if ($p.ExitCode -ne 0) { Write-Error "the frozen program failed its self-test (exit $($p.ExitCode))"; exit 1 }
+          New-Item -ItemType Directory -Force -Path build\frozen-run | Out-Null
+          Copy-Item $report build\frozen-run\ -Force
+          Copy-Item (Join-Path $results "run_summary.html") build\frozen-run\ -Force -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $results "run_summary.tsv") build\frozen-run\ -Force -ErrorAction SilentlyContinue
+
+      - name: Screenshots of the program on Windows
+        continue-on-error: true
+        run: python tools/ci_screenshots.py --out build/shots-windows
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-proof
+          retention-days: 30
+          path: |
+            build/equivalence-windows.json
+            build/selftest-windows.txt
+            build/engines/windows/BUILD_INFO.json
+            build/logs
+            build/frozen-run
+            build/shots-windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TesserACT-Win-portable
+          retention-days: 30
+          compression-level: 0
+          path: release/*
+
+  # -------------------------------------------------------------------------------------
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: TesserACT-Win-portable
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-proof
+          path: proof
+
+      - name: The tag must match the program's version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(python3 -c 'import sys; sys.path.insert(0, "."); from tesseract_win import versions; print(versions.APP_VERSION)')"
+          echo "tag=$tag version=$ver"
+          test "$tag" = "$ver"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Download **TesserACT-Win-${GITHUB_REF_NAME#v}-win64-portable.zip**, extract it, and double-click \`TesserACT-Win.exe\`."
+            echo
+            echo "The program is not code-signed: Windows will show \"Windows protected your PC\" the first time. Click **More info**, then **Run anyway**. \`SHA256SUMS.txt\` lets you check that the file is exactly what this build produced:"
+            echo
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Built by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which also checked that the Windows engines give byte-identical output to the Linux engines."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" release/* --title "TesserACT-Win ${GITHUB_REF_NAME#v}" --notes-file notes.md
