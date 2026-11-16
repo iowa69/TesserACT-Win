@@ -1,0 +1,9 @@
+TesserACT 1.6.2 preflight: fixtures/crlf/crlf_1.fq + fixtures/crlf/crlf_2.fq
+  OK     format                 2000 read pairs, every record well-formed
+  FAIL   pairing                2000 pairs whose mate names differ (first: r0/1); the files are not in the same order, or one is truncated
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 151 bp, mean 151.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 1 failed, 1 warnings

@@ -1,0 +1,1 @@
+cd /work/wrapper && env -i HOME=/home/user LANG=en_US.UTF-8 PATH=/work/wrapper/toolbin/native TESSERACT_ASM=/opt/tesseract/tesseract-asm /work/tesseract-1.6.2/tesseract -1 fixtures/nope_1.fq -2 fixtures/nope_2.fq -o out/_args/missing_files_run -t 4

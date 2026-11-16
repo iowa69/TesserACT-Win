@@ -1,0 +1,1 @@
+tesseract: give both read files: -1 R1.fq.gz -2 R2.fq.gz

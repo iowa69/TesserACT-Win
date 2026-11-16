@@ -1,0 +1,12 @@
+TesserACT 1.6.2 preflight: fixtures/badlen_before_bad/bb_1.fq.gz + fixtures/badlen_before_bad/bb_2.fq.gz
+  OK     gzip                   'bb_1.fq.gz' is complete
+  OK     gzip                   'bb_2.fq.gz' is complete
+  FAIL   format                 1 malformed records (first at pair 11); is this FASTQ?
+  FAIL   format                 1 records whose sequence and quality lengths differ
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 2 failed, 1 warnings

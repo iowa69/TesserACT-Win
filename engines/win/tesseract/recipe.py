@@ -434,6 +434,34 @@ def new_libc_imports(program: Path, nm: str = "nm") -> Optional[List[str]]:
     return sorted(found - known)
 
 
+#: What a program is made of besides the staged upstream tree: the layer and the transformations.
+PORT_SOURCES = ("ts_compat.h", "ts_compat.cpp", "ts_selftest.h", "ts_selftest.cpp", "ts_compat_tests.cpp",
+                "dev_fork_batch_win.cpp", "include/sys/resource.h", "include/sys/wait.h",
+                "llp64_transform.py", "win_rules.py")
+
+
+def port_sources_sha256() -> str:
+    """One checksum for the files of this folder that decide what a built program contains.
+
+    ``build`` records it in BUILD_INFO.json, so a program can be told from one built before the
+    compatibility layer or a transformation was changed.
+    """
+    import hashlib
+    digest = hashlib.sha256()
+    for name in PORT_SOURCES:
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(buildlib.sha256(HERE / name)))
+    return digest.hexdigest()
+
+
+def _shown(path: Path) -> str:
+    """A path as BUILD_INFO.json shows it: relative to the project when it lies inside it."""
+    try:
+        return path.relative_to(REPO).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def _install(built: Path, destination: Path) -> None:
     """Put a finished program in place in one step: the old one, or the complete new one."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -484,7 +512,8 @@ def build(tc: buildlib.Toolchain, upstream: Path, stage: Path, out_dir: Path, jo
         "transformations": counts,
         "cxxflags": [f.replace(str(REPO) + os.sep, "") for f in cxxflags(tc)],
         "ldflags": [f.replace(str(REPO) + os.sep, "") for f in ldflags + libs],
-        "log": log.relative_to(REPO).as_posix(),
+        "port_sources_sha256": port_sources_sha256(),
+        "log": _shown(log),
     }
     if tc.target == "windows":
         facts.update(_check_windows_program(tc, program))
@@ -518,8 +547,8 @@ def read_skip_list(path: Optional[Path] = None) -> Dict[str, str]:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            name, _, reason = line.partition(" ")
-            skip[name] = reason.strip()
+            parts = line.split(None, 1)             # a space or a tab after the name
+            skip[parts[0]] = parts[1].strip() if len(parts) > 1 else ""
     return skip
 
 

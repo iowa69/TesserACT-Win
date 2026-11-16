@@ -1,0 +1,11 @@
+k	31
+sample	8
+completeness	0.98765
+qv_read0	41.27
+qv_solid	48.02
+missing_bp_est_3-10x	12
+solid_gt10x	40
+missing_gt10x	5
+missing_bp_est_gt10x	2250
+asm_bases_ge_minlen	10000
+lost_replicon_alarm	1

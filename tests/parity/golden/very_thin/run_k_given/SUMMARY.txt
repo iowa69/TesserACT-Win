@@ -1,0 +1,11 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/very_thin/run_k_given
+  OK     exit status            0
+  FAIL   file                   contigs.fasta missing or empty
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+
+postflight: 1 failed, 0 warnings (details above; this text is in out/very_thin/run_k_given/SUMMARY.txt)

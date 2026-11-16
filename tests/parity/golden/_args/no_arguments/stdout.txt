@@ -1,0 +1,45 @@
+tesseract -- de novo assembler for bacterial isolates (paired-end Illumina reads)
+
+USAGE
+  tesseract -1 R1.fq.gz -2 R2.fq.gz -o OUTDIR [options]      assemble (vanilla)
+  tesseract -1 R1.fq.gz -2 R2.fq.gz -o OUTDIR --organism NAME   assemble with an organism model
+  tesseract check -1 R1.fq.gz -2 R2.fq.gz                     check the reads only
+  tesseract models list | download [NAME...]                  organism models
+  tesseract --version
+
+MAIN OPTIONS
+  -1, -2 FILE          paired reads, FASTQ, gzipped or not (names may contain spaces)
+  -o DIR               output directory (must not already hold an assembly)
+  -t N                 threads (default: all cores)
+  --organism NAME      use the model of this organism (download it once first):
+                         kpneumoniae (klebsiella), ecoli, ecloacae, abaumannii,
+                         paeruginosa, saureus, efaecium, senterica (salmonella)
+  --genome-size MB     expected genome size, for the depth and size checks
+                       (default: from --organism, otherwise 5)
+
+ASSEMBLY OPTIONS (rarely needed)
+  --mode NAME          standard (default) | fast | careful | aggressive
+                       fast: fewer k values, no polishing
+                       careful: denser k ladder, more simplification, 2 polishing passes
+                       aggressive: collapses diverged repeat copies for contiguity
+                       (about one more misassembly per genome)
+  --min-contig N       shortest contig to report (default: 2k)
+  -k LIST              k-mer sizes, e.g. 21,33,55,77 (default: chosen from the read length)
+  --max-memory GB      stop cleanly above this much memory (default: 80% of RAM)
+  --map-polish bwa|bowtie2   polish against a full read alignment (needs the mapper)
+  --no-scaffold, --no-polish, --no-gfa, --no-html     skip a step or an output
+  --help-all           list every assembler setting
+
+RUN CONTROL
+  --force              assemble even if the read check fails
+  --keep-going         with --force, ignore failed output checks in the exit status
+
+OUTPUT (in OUTDIR)
+  contigs.fasta        the assembly
+  scaffolds.fasta      contigs joined across gaps of estimated size (only when gaps remain)
+  SUMMARY.txt          what was checked, every warning, and what to do about it
+  report.html          the run in a browser; report.json for scripts
+  assembly_graph.gfa   the assembly graph (opens in Bandage)
+
+EXIT STATUS
+  0 every check passed (warnings are in SUMMARY.txt), 1 a check failed, 2 usage error.

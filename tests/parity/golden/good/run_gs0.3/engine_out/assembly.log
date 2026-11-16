@@ -1,0 +1,164 @@
+[config] TESSERACT_DEEP_NORM=3e+01
+[config] TESSERACT_DEEP_NORM_MATE=both
+[config] TESSERACT_P2_CIRC=verify
+[config] TESSERACT_P2_DETECT_REPORT=1 (on)
+[config] TESSERACT_P2_DETECT_SKETCH=/work/tesseract-1.6.2/models/om2detect.sketch
+[config] TESSERACT_P2_ENDS=1 (on)
+[config] TESSERACT_P2_LIBGUARD=1 (on)
+[config] TESSERACT_P2_PROVENANCE=1 (on)
+[config] TESSERACT_P2_SELF_QA=1 (on)
+[config] TESSERACT_P2_SPIKEIN=1 (on)
+[config] TESSERACT_P2_TIPS_LOWERCASE=1 (on)
+[defaults] tie_ratio=3.000 common_prefix=250 prefix_min_body=reach min_fallback_dest=1000000000 require_support_single=1 exclude_shared_repeat_support=1 fixes=1 dropout_bridge=1
+[fixes-emit] umbrella=1 polish_skip_n=1 gapfill_strict_budget=1 gapfill_backoff=60 gapfill_skip_input_n=1 boundary_safe_trim=1 trim_copy_guard=1 split_postprocess=1 agp_gfa_v2=1
+[1/7] loading reads
+[seqio] files=2 records=120000 interrecord_blank_lines=0 dot_suffix_mate_pairs=0
+      120,000 reads, 18,000,000 bases, max length 150, paired  [mode: standard]
+[2/7] read error correction (k=21, trust cutoff auto, graph cutoff auto)
+  [deep_norm] sel=30.0 target=2.0 peak=48.0 candidates=0 dropped=0
+  [deep_norm_counts] enabled=1 ran=1 rule=both selected_pairs=0 thinned_pairs=0 selected_single=0 thinned_single=0 masked_reads=0
+  [ec_cap_mask] enabled=1 capTruncatedWalks=0 capStops=0 basesMaskedAtCap=0
+      79,357 bases corrected in 58,571 reads (0 had no trusted anchor), 1.0s
+      130,230 bases masked as unvouchable (0.72% of input)
+[3/7] de Bruijn iterations
+  k=21  [carrygate] enabled=1 mode=1 carriedKmers=0 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=21  count 0.5s  distinct=355,841 solid=345,472 cutoff=2 peak=53.0
+  k=21  graph 0.3s    built                  unitigs=7058     total=486632       N50=105        medCov=52.2
+  k=21  deadends before cleaning: 1131
+    round 1  tips=1121   bubbles=1292  chimeras=282   isolated=0    lowdepth=35    deadends=10      unitigs=17       N50=58560
+    round 2  tips=8      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+    round 3  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=21  [simplify_count_all] enabled=1 rounds=3 stoppedAtRho=0.509 hiddenStops=0
+  k=21  [joindeadends] requested=31 effective=0 roundsSkipped=3 pairsFound=0 calls=0 joined=0
+  k=21  [gapclose] off nominatorFix=1
+  k=21  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=21  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=51.2
+  k=33  carry weight raised to 4 (projected peak at final k=99 is 21.2 < 25.0)
+  k=33  [carrygate] enabled=1 mode=1 carriedKmers=299968 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=33  count 0.6s  distinct=375,196 solid=360,573 cutoff=2 peak=51.0
+  k=33  graph 0.3s    built                  unitigs=6411     total=565725       N50=94         medCov=50.7
+  k=33  deadends before cleaning: 1784
+    round 1  tips=1673   bubbles=800   chimeras=171   isolated=44   lowdepth=44    deadends=10      unitigs=17       N50=51009
+    round 2  tips=8      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+    round 3  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=33  [simplify_count_all] enabled=1 rounds=3 stoppedAtRho=0.509 hiddenStops=0
+  k=33  [joindeadends] requested=31 effective=32 roundsSkipped=3 pairsFound=0 calls=0 joined=0
+  k=33  [gapclose] off nominatorFix=1
+  k=33  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=33  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=50.3
+  k=55  carry weight raised to 4 (projected peak at final k=99 is 21.2 < 25.0)
+  k=55  [carrygate] enabled=1 mode=1 carriedKmers=299946 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=55  count 0.5s  distinct=408,006 solid=369,681 cutoff=2 peak=42.0
+  k=55  graph 0.3s    built                  unitigs=5387     total=660579       N50=117        medCov=41.5
+  k=55  deadends before cleaning: 2777
+    round 1  tips=2112   bubbles=245   chimeras=18    isolated=326  lowdepth=21    deadends=5       unitigs=7        N50=91472
+    round 2  tips=3      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+    round 3  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=55  [simplify_count_all] enabled=1 rounds=3 stoppedAtRho=0.509 hiddenStops=0
+  k=55  [joindeadends] requested=31 effective=54 roundsSkipped=3 pairsFound=0 calls=0 joined=0
+  k=55  [gapclose] off nominatorFix=1
+  k=55  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=55  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=41.4
+  k=77  carry weight raised to 4 (projected peak at final k=99 is 21.2 < 25.0)
+  k=77  [carrygate] enabled=1 mode=1 carriedKmers=299924 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=77  count 0.4s  distinct=429,689 solid=359,892 cutoff=2 peak=33.0
+  k=77  graph 0.3s    built                  unitigs=4229     total=681296       N50=175        medCov=32.5
+  k=77  deadends before cleaning: 3221
+    round 1  tips=1739   bubbles=1     chimeras=0     isolated=736  lowdepth=8     deadends=2       unitigs=1        N50=300000
+    round 2  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=77  [simplify_count_all] enabled=1 rounds=2 stoppedAtRho=0.455 hiddenStops=0
+  k=77  [joindeadends] requested=31 effective=76 roundsSkipped=2 pairsFound=0 calls=0 joined=0
+  k=77  [gapclose] off nominatorFix=1
+  k=77  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=77  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=32.5
+  k=87  carry weight raised to 4 (projected peak at final k=99 is 21.2 < 25.0)
+  k=87  [carrygate] enabled=1 mode=1 carriedKmers=299914 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=87  count 0.3s  distinct=432,932 solid=350,845 cutoff=2 peak=29.0
+  k=87  graph 0.3s    built                  unitigs=3574     total=658209       N50=219        medCov=28.6
+  k=87  deadends before cleaning: 3202
+    round 1  tips=1316   bubbles=0     chimeras=0     isolated=942  lowdepth=0     deadends=2       unitigs=1        N50=300000
+    round 2  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=87  [simplify_count_all] enabled=1 rounds=2 stoppedAtRho=0.455 hiddenStops=0
+  k=87  [joindeadends] requested=31 effective=86 roundsSkipped=2 pairsFound=0 calls=0 joined=0
+  k=87  [gapclose] off nominatorFix=1
+  k=87  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=87  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=28.6
+  k=99  carry weight raised to 4 (projected peak at final k=99 is 21.2 < 25.0)
+  k=99  [carrygate] enabled=1 mode=1 carriedKmers=299902 readAbsent=0 runs=0 runsTooLong=0 runsNoCompetitor=0 candidates=0 runsGated=0 kmersWithheld=0
+  k=99  count 0.3s  distinct=430,253 solid=338,146 cutoff=2 peak=24.0
+  k=99  graph 0.3s    built                  unitigs=2822     total=614702       N50=301        medCov=23.9
+  k=99  deadends before cleaning: 3027
+    round 1  tips=871    bubbles=0     chimeras=0     isolated=1062 lowdepth=2     deadends=30      unitigs=15       N50=300000
+    round 2  tips=0      bubbles=0     chimeras=0     isolated=11   lowdepth=0     deadends=8       unitigs=4        N50=300000
+    round 3  tips=0      bubbles=0     chimeras=0     isolated=3    lowdepth=0     deadends=2       unitigs=1        N50=300000
+    round 4  tips=0      bubbles=0     chimeras=0     isolated=0    lowdepth=0     deadends=2       unitigs=1        N50=300000
+  k=99  [simplify_count_all] enabled=1 rounds=4 stoppedAtRho=0.564 hiddenStops=0
+  k=99  [joindeadends] requested=31 effective=98 roundsSkipped=4 pairsFound=0 calls=0 joined=0
+  k=99  [gapclose] off nominatorFix=1
+  k=99  [hairpin_keep] enabled=1 kept=0 dropped=0
+  k=99  simplify 0.0s    simplified             unitigs=1        total=300000       N50=300000     medCov=23.9
+[dropoutbridge] K=99 med=23.86 deadends=2 eligible=2 anchors=60 anchors_dropped=0 reads_hit=82 pairs_nominated=0 ref_minreads=0 ref_dup=0 ref_modal=0 ref_consensus=0 ref_competing=0 ref_overlap=0 ref_lowcx=0 ref_self=0 bridged=0 overlap_bridged=0 bp_added=0 seconds=0.02 min_reads=2 nominations=0 ends_noanchor=0 merged=0 raw_gap_votes=0 masked_hits=0 rss_delta_mb=0.0 enabled=1
+[4/7] paired-end repeat resolution
+[resolver] run=1 theta=23.8574 repeatThreshold=38.1719 estimator=weighted legacyMedian=23.8574 population=1
+      insert size 349 +/- 28 from 59,991 pairs
+      119,982 reads anchored, 0 linking pairs, 0 distinct links
+[readthread] reads=120000 acceptedReads=0 molecules=0 fresh=0 pairedExcluded=0 routes=0 unknown=3075 noFlanks=111973 noExact=4952 ambiguous=0 searchLimited=0 mateDuplicates=0 conflictingMates=0
+[readthread-result] nominations=0 conflictingPorts=0 joins=0
+[onesidedtie] weakNominations=0 weakJoins=0 refusedLongBranching=0 refusedTwoSided=0 refusedPartnerNotDecisive=0 threadPreferred=0 long=2000 enabled=0
+[tiesingleexit] exempted=0 refusedLong=0 long=0 enabled=0
+[fallbackmatching] kept=0 refused=0 enabled=0
+[resolveflags] run=1 requireSupportSingle=1 minFallbackDest=1000000000 excludeSharedRepeat=1 sharedAudit=0 noUnspannedFallback=0 linkBar=2.000 tieRatio=3.000 evals=2 ok=0 noCand=2 noPick=0 tie=0 midChain=0 byCoverage=0 matched=0 shortDest=0 unspanned=0 loneRepeat=0 sharedExcludedAll=0 esrsChanged=0
+[enumtrunc] run=1 guard=1 sides=0 budget=0 maxNodes=0 cap64=0 lone=0 loneBelowBar=0 refused=0
+[revisit] run=1 guard=1 prunedSides=0 pickedSkipped=0 refused=0
+[scafcycle] run=1 enabled=1 cycles=0 chains=0 joinsInCycles=0 joinsDropped=0 cycleBases=0 broken=0
+[gapest] run=1 enabled=1 joins=0 estimated=0 changed=0 floor1=0 overlapEst=0 skippedNoMean=0 medianShift=0
+[gapflank] run=1 enabled=1 gaps=0 restorableBases=0 overlapGaps=0 overlapBases=0 pLineOverspell=0 overlapRejected=0 floor1=0 unknownLen=0
+[cov_contrib] run=1 enabled=1 paths=1 full_vs_contributed_off10=0
+[routeorder] run=1 enabled=1 decisions=0 sorted=0
+[mirrorroute] run=1 enabled=1 disagreements=0 choseBack=0
+[pairprefix] m=0 mode=node anchors=0 ends=0 capped=0 zero=0 bp_walk=0 bp_kept=0 mates=0 enabled=0
+[endext] budget=250 min_body=461 ends_checked=2 ends_skipped_short_body=0 certified=0 flow=0.80 anchor_stops=0 flow_stops=0 no_revisit=0 revisit_stops=0 enabled=1
+      1 paths, 0 joins, 0.7s
+[p2-r2] enabled=1 evaluated=1 fired=0 reason=0 pairs=60000 same_unitig=59991 inward=59991 outward=0 dovetail=0 same_strand=0 fr_observations=59991 outward_frac=0.0000 fr_fit=0.9999
+[om2-close] enabled=0 clusters=0 bridges=0 forced=0 pair_thread=0 tiebreak=0 open=0 budget_refused=0 hairpin_refused=0 fills_contig=0 fills_genome=0 alloc_pair=0 alloc_thread=0 alloc_prior=0 alloc_multiplicity=0 alloc_consensus=0 variant_sites=0 circles_tested=0 circles_closed=0 rotated=0 abstain_tangled=0 | junctions=0 wraps=0 anchored=0 unanchored=0 tiebreak_unverified=0 cyclic=0 double_use=0 no_walk=0 flank_mismatch=0 overlap=0 length_inconsistent=0 fill_bp_contig=0 fill_bp_genome=0 prior_noflip=0 budget_exhausted=0 circles_contig=0 circles_overlap=0 c1_attached=0 c1_refused=0 c1_gated=0 wraps_open=0 variant_rows=0 prior_loaded=0 dnaa_loaded=0 seconds=0.0
+[5/7] scaffold gap closing
+[gapfill-budget] strict=1 truncated=0 truncAccepted=0 truncRefused=0 capped=0 cappedAccepted=0 searches=0
+[gapfill-backoff] B=60 seedBelowFloor=0 targetBelowFloor=0 seedBackedOff=0 targetBackedOff=0 attempts=0 closedAfterBackoff=0 trimmedBp=0 cancelled=0
+[gapfill-inputn] enabled=1 provenance=1 reads_input_n=0 recruited_input_n=0 kmers_skipped_input_n=0
+[om2-evidence] enabled=0 nodes=0 components=0 single_copy=0 repeat=0 uncertain=0 sc_fraction=0.000 theta=0.00 anchored=0 unanchored=0 abstain_tangled=0 pair_index=0 reads_anchored=0 pairs_spanning=0 pairs_control=0 build_ms=0 pair_ms=0
+[om2-seam] enabled=0 mode=off unsized=- cap=- pairs=0 plasmid_rule=0 closegaps_policy=0 admit=v0 judged=0 resolver_judged=0 pass_exact=0 pass_walk=0 resize=0 break_double_use=0 contra_pairs_ok=0 contra_refused=0 pairs_deny=0 silent=0 unanchored=0 abstain=0 butt_seen=0 butt_retired=0 cap_seen=0 cap_retired=0 overlap_seen=0 overlap_refused=0 plasmid_blocked=0 plasmid_depth_excluded=0 pair_testable=0 pair_abstain=0 pair_confirm=0 pair_deny=0 admit_scaf=0 admit_genome_only=0 admit_break=0 broken=0 resized=0 closegaps_seen=0 closegaps_disallowed=0 closegaps_blocked=0 closegaps_closed=0 judge_ms=0
+[gapflank-restore] records=0 nRuns=0 restored=0 restoredBases=0 nDelta=0 unmatchedRecords=0 ambiguous=0
+[6/7] consensus polishing
+[polish-n] skip_n=1 n_positions_with_votes=0 would_replace=0 replaced=0 n_runs=0 runs_touched=0 runs_fully_replaced=0
+      pass 1: 119,991 reads used, mean depth 59.6x, 0 bases corrected
+      replicons: 0 chromosomal, 0 plasmid contigs in 0 groups, 1 unassigned, 0 circular (modal depth 23.9x)
+[dedup] queried=0 exact_searches=0 dropped=0 dropped_bp=0
+[7/7] writing output
+[outputs] stale_removed=0
+[splitpost] enabled=1 pieces=1 multi_piece_scaffolds=0 dropped_short=0 dropped_short_bp=0 dropped_dup=0 dropped_dup_bp=0 circular_tags_dropped=0 cov_relabelled=0 cov_fallback=0
+[boundarytrim] enabled=1 trims=0 bp_trimmed=0 boundary_bp_kept=0 equal_len_flips=0 skipped_short=0
+[trimguard] enabled=1 components=0 nonbipartite=0 guard_differs=0 guard_applied=0 evidence_refused=0 evidence_switched=0 ends_rescued=0 release_cuts_avoided=0
+      circles (verify): 0 candidates, 0 written circular, 0 linear
+[p2-r3] enabled=1 mode=2 candidates=0 closure_self=0 closure_via=0 closure_repeat_end=0 closure_none=0 closure_nopath=0 closure_ends_changed=0 closure_gapped=0 isolated=0 pass_j=0 pass_x=0 verified=0 written_circular=0 written_linear=0 closed=0 trim_records=0 trim_bp=0 insert_records=0 insert_bp=0 kminus1_trims=0 scaffold_claims_dropped=0 reads_placed=0 window_hi=0
+[p2-f5] enabled=1 screened=1 spikein=0 spikein_bp=0 spikein_circular=0
+      out/good/run_gs0.3/contigs.fasta
+      out/good/run_gs0.3/assembly_graph.gfa  (1 segments, 0 links)
+[agpgfa] enabled=1 W=0 W_partner=0 W_unlisted=0 N_paired=0 N_unspecified=0 P_emitted=1 P_dropped=0
+[om2-out] enabled=0 records=0 chr_records=0 circular=0 rotated=0 genome_only_joins=0 fills=0 allocated_bp=0 agp_evidence_gaps=0 detect_score=NA detect_second=NA seams=0 unrecorded=0 ambiguous=0 scaffold_splits=0 broken=0 variant_rows=0 agp_evidence=0 owned_by_c1=0 overlap_trimmed=0 reversed=0
+[om2-clonal] enabled=0 ran=0 skip=- k=0 d_near=NA group=- records=0 candidates=0 ends_placed=0 proposals=0 mutual=0 refused_pairs=0 refused_graph=0 refused_size=0 refused_c1=0 cycle_cut=0 joins=0 joins_positional=0 joins_layout=0 joins_non_positional=0 no_fill=0 sized_graph=0 sized_nr=0 contra_checked=0 contra_broken=0 contra_kept_proven=0 chains=0 records_out=0 nrp=0 plasmid_tracks=0 plasmid_candidates=0 plasmid_mutual=0 plasmid_joins=0 refused_depth=0 annotated=0 confident=0 supported=0 provisional=0 gap_claims=0 ms=0 overlap_joins=0 overlap_c1_conflict=0 vouched=0 bracket_would=0 bracket_joins=0 merged=0 size_checked=0 size_agree=0 resized=0 walksize_checked=0 walksize_resized=0 walksize_links=0 kc2_checked=0 kc2_nofill=0 kc2_links=0 conf_capped=0 discord_events=0 discord=0 cap_walk_c1=0 unverified_broken=0 strict=0 strict_nr0=0 strict_checked=0 strict_broken=0 strict_refused=0 strict_periodic=0 strict_no_relative=0
+[p2-ends] enabled=1 lowercase=1 records=1 ends=2 tip_ends=0 tip_bases=0 lowercased_bases=0 unique=0 branching=0 repeat_only=0 none=2 na=0
+[p2-sqa] enabled=1 ran=1 completeness=1.00000 qv_read0=99.00 missing_gt10x_bp=0 missing_3_10x_bp=0 spike_solid=0 alarm=0
+[p2-prov] enabled=1 files=4 bytes=9897507
+[p2-detect] enabled=1 ran=1 best=kpneumoniae best_score=0.0000 second=abaumannii second_score=0.0000 call=- mixture=0 model_applied=0
+[p2-readpass] enabled=1 files=2 reads=120000 bases=18000000
+      out/good/run_gs0.3/report.json
+      out/good/run_gs0.3/report.html
+
+  contigs      1
+  total length 300,000 bp
+  largest      300,000 bp
+  N50          300,000 bp    N90 300,000 bp    L50 1
+  GC           49.99%
+  k-mer depth  23.9x (k=99)
+  read depth   59.6x (measured by mapping reads back)
+  elapsed      6.6s   peak memory 279.14 MB

@@ -1,0 +1,14 @@
+./SUMMARY.txt
+./assembly.log
+./assembly_graph.gfa
+./assembly_stats.tsv
+./attempt1_default_k/
+./attempt1_default_k/assembly.log
+./attempt1_default_k/assembly_graph.gfa
+./attempt1_default_k/contigs.fasta
+./attempt1_default_k/p2_self_qa.tsv
+./attempt1_default_k/report.json
+./contigs.fasta
+./p2_self_qa.tsv
+./preflight.txt
+./report.json

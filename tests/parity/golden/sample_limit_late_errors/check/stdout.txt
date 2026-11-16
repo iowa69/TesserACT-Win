@@ -1,0 +1,11 @@
+TesserACT 1.6.2 preflight: fixtures/sample_limit_late_errors/late_1.fq.gz + fixtures/sample_limit_late_errors/late_2.fq.gz
+  OK     gzip                   'late_1.fq.gz' is complete
+  OK     gzip                   'late_2.fq.gz' is complete
+  FAIL   format                 1 malformed records (first at pair 200002); is this FASTQ?
+  FAIL   pairing                1 pairs whose mate names differ (first: s200000); the files are not in the same order, or one is truncated
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 60 bp, mean 40.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 3x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 2 failed, 1 warnings

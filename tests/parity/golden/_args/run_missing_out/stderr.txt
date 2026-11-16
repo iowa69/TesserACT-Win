@@ -1,0 +1,1 @@
+tesseract: give an output directory: -o OUTDIR

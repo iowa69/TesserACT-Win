@@ -1,0 +1,17 @@
+./SUMMARY.txt
+./assembly.log
+./assembly_graph.gfa
+./assembly_stats.tsv
+./contigs.fasta
+./ends.tsv
+./p2_edits.tsv
+./p2_self_qa.absent.bed
+./p2_self_qa.contigs.tsv
+./p2_self_qa.missing_hi.tsv
+./p2_self_qa.tsv
+./preflight.txt
+./replicons.tsv
+./report.html
+./report.json
+./scaffolds.agp
+./scaffolds.fasta

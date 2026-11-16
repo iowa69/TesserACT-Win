@@ -1,0 +1,10 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2-fake
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/_postflight/retry_rcfail
+  FAIL   exit status            1 (see out/_postflight/retry_rcfail.log)
+  WARN   thin data              the default k ladder assembled almost nothing; this result uses k = 21,33,55 (the first attempt is in attempt1_default_k/). Expect a fragmented assembly: sequence more deeply if you can
+
+postflight: 1 failed, 1 warnings (details above; this text is in out/_postflight/retry_rcfail/SUMMARY.txt)

@@ -1,0 +1,13 @@
+TesserACT 1.6.2 preflight: fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  OK     gzip                   'verythin_1.fq.gz' is complete
+  OK     gzip                   'verythin_2.fq.gz' is complete
+  OK     format                 300 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/_postflight/rcfail_signature
+  OK     memory                 8 GB available
+preflight: 0 failed, 1 warnings

@@ -1,0 +1,16 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2-fake
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/_postflight/crlf_outputs
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  FAIL   contigs.fasta          malformed: 0 duplicate names, 0 empty records, 168 lines with non-ACGTN characters
+  OK     self-check             k-mer completeness 0.99871, QV 47.13; no high-copy sequence lost
+  OK     circles                1 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  WARN   spike-in               1 PhiX record(s) labelled _spikein: remove them before submission
+  WARN   library                pair orientation check 'outward': not a standard FR library; pair-based joins were disabled
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+
+postflight: 1 failed, 2 warnings (details above; this text is in out/_postflight/crlf_outputs/SUMMARY.txt)

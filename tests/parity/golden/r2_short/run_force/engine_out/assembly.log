@@ -1,0 +1,15 @@
+[config] TESSERACT_DEEP_NORM=3e+01
+[config] TESSERACT_DEEP_NORM_MATE=both
+[config] TESSERACT_P2_CIRC=verify
+[config] TESSERACT_P2_DETECT_REPORT=1 (on)
+[config] TESSERACT_P2_DETECT_SKETCH=/work/tesseract-1.6.2/models/om2detect.sketch
+[config] TESSERACT_P2_ENDS=1 (on)
+[config] TESSERACT_P2_LIBGUARD=1 (on)
+[config] TESSERACT_P2_PROVENANCE=1 (on)
+[config] TESSERACT_P2_SELF_QA=1 (on)
+[config] TESSERACT_P2_SPIKEIN=1 (on)
+[config] TESSERACT_P2_TIPS_LOWERCASE=1 (on)
+[defaults] tie_ratio=3.000 common_prefix=250 prefix_min_body=reach min_fallback_dest=1000000000 require_support_single=1 exclude_shared_repeat_support=1 fixes=1 dropout_bridge=1
+[fixes-emit] umbrella=1 polish_skip_n=1 gapfill_strict_budget=1 gapfill_backoff=60 gapfill_skip_input_n=1 boundary_safe_trim=1 trim_copy_guard=1 split_postprocess=1 agp_gfa_v2=1
+[1/7] loading reads
+error: paired files are out of sync: 'fixtures/r2_short/r2short_1.fq.gz' has 20000 records but 'fixtures/r2_short/r2short_2.fq.gz' has 19963

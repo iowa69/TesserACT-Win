@@ -1,0 +1,9 @@
+{
+    "tool": "TesserACT",
+    "version": "1.6.2",
+    "mode": "standard",
+    "p2": {"enabled": 1, "counters": {"self_qa_run": 1, "self_qa_alarm": 0}, "r2": {"enabled": 1, "evaluated": 1, "fired": 0, "pairs": 300, "outward_frac": 0, "fr_fit": 0.99, "verdict": "pass", "max_outward_frac": 0.5, "min_fr_fit": 0.25}, "r3": {"enabled": 1, "mode": 2, "candidates": 0, "verified": 0, "written_circular": 0, "written_linear": 0, "closed": 0, "mode_name": "verify", "circles": []}, "f5": {"enabled": 1, "screened": 1, "spikein": 0, "spikein_bp": 0, "spikein_circular": 0, "set": "phiX174 NC_001422.1", "records": []}, "self_qa": {"ran": true, "verdict": "no lost-replicon alarm"}, "organism_detect": {"mode": "report_only", "ran": true, "sketch_path": "/opt/tess share/om2detect.sketch", "sketch_md5": "43f0d121ca5ab647653cb1a7158bc503", "models": [{"name": "ecoli", "core": 3000, "core_hit": 2950, "score": 0.9833, "hold_list": "x (md5 0)"}, {"name": "senterica", "core": 3100, "core_hit": 97, "score": 0.0313}], "best": "ecoli", "best_score": 0.9833, "second": "senterica", "second_score": 0.0313, "accept_threshold": 0.85, "mixture_threshold": 0.1, "accepted": true, "call": "ecoli", "mixture": false, "model_applied": false}},
+    "assembly": {
+        "contigs": 3
+    }
+}

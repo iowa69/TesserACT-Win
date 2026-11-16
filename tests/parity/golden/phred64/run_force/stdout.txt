@@ -1,0 +1,29 @@
+TesserACT 1.6.2 preflight: fixtures/phred64/phred64_1.fq.gz + fixtures/phred64/phred64_2.fq.gz
+  OK     gzip                   'phred64_1.fq.gz' is complete
+  OK     gzip                   'phred64_2.fq.gz' is complete
+  OK     format                 20000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  FAIL   quality                -1 file: qualities look Phred+64 (codes 66-104); convert to Phred+33 first (e.g. seqtk seq -VQ64)
+  FAIL   quality                -2 file: qualities look Phred+64 (codes 66-104); convert to Phred+33 first (e.g. seqtk seq -VQ64)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 1x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/phred64/run_force
+  OK     memory                 9 GB available
+preflight: 2 failed, 1 warnings
+assembling into out/phred64/run_force (vanilla) ...
+TesserACT 1.6.2 run summary
+  reads    fixtures/phred64/phred64_1.fq.gz + fixtures/phred64/phred64_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 2 failed, 1 warnings
+[vanilla assembly] out/phred64/run_force
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  OK     contigs.fasta          1 contigs, 300000 bp; largest 300000; N50 300000 (L50 1); N90 300000 (L90 1)
+  OK     self-check             k-mer completeness 0.99992, QV 99.00; no high-copy sequence lost
+  OK     circles                0 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+
+postflight: 0 failed, 0 warnings (details above; this text is in out/phred64/run_force/SUMMARY.txt)

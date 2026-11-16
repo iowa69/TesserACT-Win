@@ -1,0 +1,8 @@
+-1
+fixtures/trunc_gz/trunc_1.fq.gz
+-2
+fixtures/trunc_gz/trunc_2.fq.gz
+-o
+out/_postflight/retry_ignores_genome_size_after_failed_preflight
+-t
+4

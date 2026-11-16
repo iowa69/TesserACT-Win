@@ -1,0 +1,9 @@
+-1
+fixtures/very_thin/verythin_1.fq.gz
+-2
+fixtures/very_thin/verythin_2.fq.gz
+-o
+out/_postflight/retry_k_attached
+-t
+4
+-k21,33

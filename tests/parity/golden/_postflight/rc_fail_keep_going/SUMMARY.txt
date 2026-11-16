@@ -1,0 +1,9 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2-fake
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/_postflight/rc_fail_keep_going
+  FAIL   exit status            3 (see out/_postflight/rc_fail_keep_going.log)
+
+postflight: 1 failed, 0 warnings (details above; this text is in out/_postflight/rc_fail_keep_going/SUMMARY.txt)

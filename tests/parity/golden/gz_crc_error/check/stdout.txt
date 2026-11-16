@@ -1,0 +1,4 @@
+TesserACT 1.6.2 preflight: fixtures/gz_crc_error/crc_1.fq.gz + fixtures/gz_crc_error/crc_2.fq.gz
+  OK     gzip                   'crc_1.fq.gz' is complete
+  FAIL   gzip                   'fixtures/gz_crc_error/crc_2.fq.gz' is truncated or corrupt (gzip -t failed)
+preflight: 1 failed, 0 warnings

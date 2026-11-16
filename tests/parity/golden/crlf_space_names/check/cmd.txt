@@ -1,0 +1,1 @@
+cd /work/wrapper && env -i HOME=/home/user LANG=en_US.UTF-8 PATH=/work/wrapper/toolbin/native TESSERACT_ASM=/opt/tesseract/tesseract-asm /work/tesseract-1.6.2/tesseract check -1 fixtures/crlf_space_names/crlfsp_1.fq -2 fixtures/crlf_space_names/crlfsp_2.fq

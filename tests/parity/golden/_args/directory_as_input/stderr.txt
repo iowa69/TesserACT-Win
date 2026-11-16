@@ -1,0 +1,3 @@
+head: error writing 'standard output': Is a directory (os error 21)
+head: error writing 'standard output': Is a directory (os error 21)
+cat: fixtures/tiny29: Is a directory

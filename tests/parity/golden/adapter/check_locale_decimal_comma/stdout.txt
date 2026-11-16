@@ -1,0 +1,11 @@
+TesserACT 1.6.2 preflight: fixtures/adapter/adapter_1.fq.gz + fixtures/adapter/adapter_2.fq.gz
+  OK     gzip                   'adapter_1.fq.gz' is complete
+  OK     gzip                   'adapter_2.fq.gz' is complete
+  OK     format                 60000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  OK     depth                  about 60x for a 0.3 Mb genome
+  WARN   adapters               7.9% of read pairs carry Illumina adapter sequence: trim them first (fastp, cutadapt)
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 0 failed, 1 warnings

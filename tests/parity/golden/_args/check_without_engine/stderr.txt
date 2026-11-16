@@ -1,0 +1,1 @@
+tesseract: the assembler engine is missing from this installation (reinstall, or set TESSERACT_ASM)

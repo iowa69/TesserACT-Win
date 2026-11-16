@@ -1,0 +1,6 @@
+TesserACT 1.6.2 preflight: fixtures/empty/empty_1.fq.gz + fixtures/empty/empty_2.fq.gz
+  OK     gzip                   'empty_1.fq.gz' is complete
+  FAIL   file                   'fixtures/empty/empty_2.fq.gz' is empty
+  OK     disk                   7 GB free in out/empty/run_noforce
+  OK     memory                 9 GB available
+preflight: 1 failed, 0 warnings

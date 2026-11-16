@@ -1,0 +1,4 @@
+tesseract models list                 show the models and which are installed
+tesseract models download            download all models (~1.7 GB, once)
+tesseract models download NAME...    download only these
+Models go to ~/.tesseract/models (TESSERACT_MODEL_DIR or --dir PATH moves them).

@@ -1,0 +1,14 @@
+TesserACT 1.6.2 preflight: fixtures/r2_short/r2short_1.fq.gz + fixtures/r2_short/r2short_2.fq.gz
+  OK     gzip                   'r2short_1.fq.gz' is complete
+  OK     gzip                   'r2short_2.fq.gz' is complete
+  OK     format                 20000 read pairs, every record well-formed
+  FAIL   pairing                the -2 file has 37 fewer reads than the -1 file (truncated, or not the mate file)
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 1x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/r2_short/run_force
+  OK     memory                 9 GB available
+preflight: 1 failed, 1 warnings

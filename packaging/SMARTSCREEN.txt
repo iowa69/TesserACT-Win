@@ -1,0 +1,40 @@
+"Windows protected your PC" - what it means and what to do
+===========================================================
+
+The first time you start TesserACT-Win, Windows may show a blue box that says
+"Windows protected your PC".
+
+To continue: click "More info", then "Run anyway".
+
+Why it appears
+--------------
+This is Windows SmartScreen. It is not a virus warning. SmartScreen judges a file by
+its reputation, not by its content: a program it has not seen often, from a publisher
+without a paid signing certificate, gets this box by default. TesserACT-Win is NOT
+code-signed, so SmartScreen says so.
+
+How to check that your download is genuine
+------------------------------------------
+Every release is built in public by GitHub Actions from the source code at
+https://github.com/iowa69/TesserACT-Win and a file called SHA256SUMS.txt is published
+next to the download. In PowerShell:
+
+    Get-FileHash .\TesserACT-Win-<version>-win64-portable.zip -Algorithm SHA256
+
+Compare the result with the line in SHA256SUMS.txt. If they match, you have exactly
+what was built from that source.
+
+What we will never ask you to do
+--------------------------------
+Switch off SmartScreen. Switch off Microsoft Defender or your antivirus. Edit the
+registry. Install a certificate. If a page that claims to be about TesserACT-Win tells
+you to do any of these, it is not from us.
+
+If your antivirus removes a file
+--------------------------------
+Programs that are not code-signed are sometimes flagged by mistake. If TesserACT-Win
+says that "tesseract-asm.exe" or "scepter.exe" is missing or blocked, your antivirus
+has probably put it in quarantine. Restore the file from the antivirus quarantine, add
+the TesserACT-Win folder to its exclusions, or ask your IT department to do so.
+
+IOWA-BioTech - Giovanni Lorenzin

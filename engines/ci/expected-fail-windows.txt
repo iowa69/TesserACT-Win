@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+#
+# Checks of the upstream bash suites that cannot pass on Windows, each with the reason.
+# Read by engines/ci/run_upstream_suites.sh on Windows only; on Linux every check must pass.
+#
+# One per line:   suite|start of the check's name   # reason
+#
+#   suite   tesseract-e2e, tesseract-flags, scepter-e2e or scepter-flags
+#   name    the text that follows "FAIL  " in the suite's output; the start of it is enough
+#
+# A check listed here may fail without failing the build. A failed check that is not listed
+# fails the build, and the script prints the exact text to put here. List a check only when
+# it tests something the Windows program does not have (the bash "tesseract" command,
+# install.sh, tesseract-get-models: the program replaces all three) or something Windows
+# cannot do (a symbolic link), never to hide a different result from an engine.
+#
+# Empty on purpose: the suites have not run on Windows yet. Fill it in from the first run
+# of the "Windows build, proof and package" job, one understood reason per line.

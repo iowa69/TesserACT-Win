@@ -1,0 +1,10 @@
+TesserACT 1.6.2 preflight: fixtures/blank_tail_both/blank_1.fq + fixtures/blank_tail_both/blank_2.fq
+  OK     format                 2001 read pairs, every record well-formed
+  FAIL   pairing                the -2 file has 1 fewer reads than the -1 file (truncated, or not the mate file)
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 1 failed, 1 warnings

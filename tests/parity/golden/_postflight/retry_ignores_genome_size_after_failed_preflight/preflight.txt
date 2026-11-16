@@ -1,0 +1,6 @@
+TesserACT 1.6.2 preflight: fixtures/trunc_gz/trunc_1.fq.gz + fixtures/trunc_gz/trunc_2.fq.gz
+  OK     gzip                   'trunc_1.fq.gz' is complete
+  FAIL   gzip                   'fixtures/trunc_gz/trunc_2.fq.gz' is truncated or corrupt (gzip -t failed)
+  OK     disk                   7 GB free in out/_postflight/retry_ignores_genome_size_after_failed_preflight
+  OK     memory                 8 GB available
+preflight: 1 failed, 0 warnings

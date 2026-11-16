@@ -1,0 +1,13 @@
+TesserACT 1.6.2 preflight: fixtures/good/good_1.fq.gz + fixtures/good/good_2.fq.gz
+  OK     gzip                   'good_1.fq.gz' is complete
+  OK     gzip                   'good_2.fq.gz' is complete
+  OK     format                 60000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  OK     depth                  about 60x for a 0.3 Mb genome
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/good/run_gs0.3
+  OK     memory                 8 GB available
+preflight: 0 failed, 0 warnings

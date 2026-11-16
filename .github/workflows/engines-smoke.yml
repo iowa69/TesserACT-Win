@@ -82,6 +82,7 @@ jobs:
     name: Same output on Windows as on Linux
     runs-on: ubuntu-24.04
     needs: [linux, windows]
+    if: always()
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

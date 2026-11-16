@@ -1,0 +1,28 @@
+TesserACT 1.6.2 preflight: fixtures/adapter/adapter_1.fq.gz + fixtures/adapter/adapter_2.fq.gz
+  OK     gzip                   'adapter_1.fq.gz' is complete
+  OK     gzip                   'adapter_2.fq.gz' is complete
+  OK     format                 60000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 4x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  WARN   adapters               7.9% of read pairs carry Illumina adapter sequence: trim them first (fastp, cutadapt)
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/adapter/run
+  OK     memory                 8 GB available
+preflight: 0 failed, 2 warnings
+assembling into out/adapter/run (vanilla) ...
+TesserACT 1.6.2 run summary
+  reads    fixtures/adapter/adapter_1.fq.gz + fixtures/adapter/adapter_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 2 warnings
+[vanilla assembly] out/adapter/run
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  OK     contigs.fasta          1 contigs, 300036 bp; largest 300036; N50 300036 (L50 1); N90 300036 (L90 1)
+  OK     self-check             k-mer completeness 0.99480, QV 99.00; no high-copy sequence lost
+  OK     circles                0 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+
+postflight: 0 failed, 0 warnings (details above; this text is in out/adapter/run/SUMMARY.txt)

@@ -1,0 +1,1 @@
+tesseract: out/good/run already holds an assembly; choose a new output directory

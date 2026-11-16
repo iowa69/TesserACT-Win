@@ -1,0 +1,4 @@
+TesserACT 1.6.2 preflight: fixtures/nope_1.fq + fixtures/nope_2.fq
+  FAIL   file                   cannot read 'fixtures/nope_1.fq'
+  FAIL   file                   cannot read 'fixtures/nope_2.fq'
+preflight: 2 failed, 0 warnings

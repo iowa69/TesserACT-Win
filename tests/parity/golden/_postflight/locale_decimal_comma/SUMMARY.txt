@@ -1,0 +1,15 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2-fake
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/_postflight/locale_decimal_comma
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  OK     contigs.fasta          3 contigs, 10000 bp; largest 5000; N50 5000 (L50 1); N90 2000 (L90 3)
+  WARN   size                   total 0.01 Mb vs ~0.013 Mb expected: contamination, a mixed sample, or the wrong genome size
+  WARN   self-check             k-mer completeness 0.98765, QV 41.27; about 2.2 kb of sequence seen in the reads at >10x genome depth is not in the assembly (a small high-copy plasmid, rRNA or IS copies); see p2_self_qa.missing_hi.tsv
+  OK     circles                0 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+
+postflight: 0 failed, 2 warnings (details above; this text is in out/_postflight/locale_decimal_comma/SUMMARY.txt)

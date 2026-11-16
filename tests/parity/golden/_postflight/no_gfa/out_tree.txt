@@ -1,0 +1,7 @@
+./SUMMARY.txt
+./assembly.log
+./assembly_stats.tsv
+./contigs.fasta
+./p2_self_qa.tsv
+./preflight.txt
+./report.json

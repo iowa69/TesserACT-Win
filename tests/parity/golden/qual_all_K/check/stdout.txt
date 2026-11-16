@@ -1,0 +1,12 @@
+TesserACT 1.6.2 preflight: fixtures/qual_all_K/qK_1.fq.gz + fixtures/qual_all_K/qK_2.fq.gz
+  OK     gzip                   'qK_1.fq.gz' is complete
+  OK     gzip                   'qK_2.fq.gz' is complete
+  OK     format                 2000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  FAIL   quality                -1 file: qualities look Phred+64 (codes 75-75); convert to Phred+33 first (e.g. seqtk seq -VQ64)
+  FAIL   quality                -2 file: qualities look Phred+64 (codes 75-75); convert to Phred+33 first (e.g. seqtk seq -VQ64)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 2 failed, 1 warnings

@@ -1,0 +1,4 @@
+TesserACT 1.6.2 preflight: fixtures/both_empty/e_1.fq + fixtures/both_empty/e_2.fq
+  FAIL   file                   'fixtures/both_empty/e_1.fq' is empty
+  FAIL   file                   'fixtures/both_empty/e_2.fq' is empty
+preflight: 2 failed, 0 warnings

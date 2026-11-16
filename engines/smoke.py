@@ -225,7 +225,9 @@ def cmd_compare(args) -> int:
     for engine in ("tesseract-asm", "scepter"):
         sa = a["selftest"][engine]["answers"]
         sb = b["selftest"][engine]["answers"]
-        for key in sorted(set(sa) | set(sb)):
+        # A probe that exists on one platform only (the Windows-specific ones) has nothing
+        # to be compared with; its own pass or fail is already in that platform's exit code.
+        for key in sorted(set(sa) & set(sb)):
             if key.startswith(SELFTEST_FREE):
                 continue
             same("self-test %s %s" % (engine, key), sa.get(key), sb.get(key))

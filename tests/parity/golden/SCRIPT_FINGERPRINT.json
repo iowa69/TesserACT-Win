@@ -1,0 +1,182 @@
+{
+ "lines": 415,
+ "literals": {
+  "adapter": [
+   "AGATCGGAAGAGC"
+  ],
+  "check_names": [
+   "N bases",
+   "adapters",
+   "circles",
+   "contigs.fasta",
+   "depth",
+   "disk",
+   "exit status",
+   "file",
+   "format",
+   "gzip",
+   "library",
+   "map-back",
+   "memory",
+   "organism",
+   "pairing",
+   "poly-G",
+   "quality",
+   "read length",
+   "report.json",
+   "scaffolds.fasta",
+   "self-check",
+   "size",
+   "spike-in",
+   "thin data"
+  ],
+  "disk_need": [
+   "$(( ( $(wc -c < \"$R1\") + $(wc -c < \"$R2\") ) * 3 / 1024 + 2097152 ))"
+  ],
+  "engine_outputs_read": [
+   ".lens",
+   "SUMMARY.txt",
+   "assembly.log",
+   "assembly_stats.tsv",
+   "attempt1_default_k",
+   "contigs.fasta",
+   "p2_self_qa.tsv",
+   "preflight.txt",
+   "report.json",
+   "scaffolds.fasta"
+  ],
+  "organism_mb": [
+   [
+    "abaumannii",
+    "4.0"
+   ],
+   [
+    "ecloacae",
+    "5.0"
+   ],
+   [
+    "ecoli",
+    "5.1"
+   ],
+   [
+    "efaecium",
+    "3.0"
+   ],
+   [
+    "kpneumoniae",
+    "5.5"
+   ],
+   [
+    "paeruginosa",
+    "6.6"
+   ],
+   [
+    "saureus",
+    "2.8"
+   ],
+   [
+    "senterica",
+    "4.9"
+   ]
+  ],
+  "polyg": [
+   "GGGGGGGGGG"
+  ],
+  "printf_formats": [
+   "%.0f",
+   "%.1f",
+   "%.2f",
+   "%.2f %.2f %d",
+   "%c",
+   "%d",
+   "%d %d %d %d %d\\n",
+   "pairs=%d bad=%d badlen=%d badrec=%d mism=%d bases=%d maxlen=%d meanlen=%.1f adapt=%.4f polyg=%.4f qmin=%d qmax=%d qmin2=%d qmax2=%d nfrac=%.5f short1=%d short2=%d firstm=%s\\n"
+  ],
+  "profile": [
+   "TESSERACT_P2_LIBGUARD=1",
+   "TESSERACT_P2_CIRC=verify",
+   "TESSERACT_P2_SPIKEIN=1",
+   "TESSERACT_P2_ENDS=1",
+   "TESSERACT_P2_TIPS_LOWERCASE=1",
+   "TESSERACT_P2_SELF_QA=1",
+   "TESSERACT_P2_PROVENANCE=1",
+   "TESSERACT_DEEP_NORM=30",
+   "TESSERACT_DEEP_NORM_MATE=both"
+  ],
+  "profile_added_with_sketch": [
+   "TESSERACT_P2_DETECT_REPORT=1 \"TESSERACT_P2_DETECT_SKETCH=$SKETCH\""
+  ],
+  "quality_step": [
+   "7"
+  ],
+  "report_json_keys": [
+   "\"call\"",
+   "\"organism_detect\"",
+   "\"r2\"",
+   "\"spikein\"",
+   "\"written_circular\"",
+   "\"written_linear\""
+  ],
+  "retry_ladder": [
+   "21,33,55"
+  ],
+  "retry_want": [
+   "0.2"
+  ],
+  "sample_rows": [
+   "200000"
+  ],
+  "thresholds_awk": [
+   "a > 0.02",
+   "a > 0.05",
+   "d < 2",
+   "p < 95",
+   "r < 0.8 || r > 1.3"
+  ],
+  "thresholds_shell": [
+   "[ \"$2\" -ge 64 ]",
+   "[ \"$2\" -lt 33 ]",
+   "[ \"$3\" -gt 74 ]",
+   "[ \"$FORCE\" -eq 0 ]",
+   "[ \"$KEEPGOING\" -eq 1 ]",
+   "[ \"$RETRIED\" -eq 1 ]",
+   "[ \"$TH\" -ge 1 ]",
+   "[ \"$bad\" -eq 0 ]",
+   "[ \"$badlen\" -eq 0 ]",
+   "[ \"$depth\" -gt 400 ]",
+   "[ \"$depth\" -lt 15 ]",
+   "[ \"$depth\" -lt 30 ]",
+   "[ \"$fails\" -eq 0 ]",
+   "[ \"$fails\" -gt 0 ]",
+   "[ \"$maxlen\" -ge 240 ]",
+   "[ \"$mem_kb\" -ge 4194304 ]",
+   "[ \"$mism\" -eq 0 ]",
+   "[ \"$qok\" -eq 1 ]",
+   "[ \"$rc\" -eq 0 ]",
+   "[ \"$rc_v\" -eq 0 ]",
+   "[ \"$tot\" -gt 0 ]",
+   "[ \"${avail_kb:-0}\" -ge \"$need_kb\" ]",
+   "[ \"${got:-0}\" -lt \"$want\" ]",
+   "[ \"${mem_kb:-0}\" -gt 0 ]",
+   "[ \"${nreads:-0}\" -gt 0 ]",
+   "[ \"${pairs:-0}\" -eq 0 ]",
+   "[ \"${spike:-0}\" -gt 0 ]"
+  ]
+ },
+ "sections": {
+  "arguments": "69cca4c093d807084cbd21f868bc2e060736d48e6ad45d324d2154d114944880",
+  "assembly": "46359fc849c13959a2f939956513bc2b5b87a5ad18e8be602beacb43eff9a8c1",
+  "head": "f12d642d6d3fdbe09ea5902fb79c378d09d750b222ab83889caed338f135f9ee",
+  "postflight": "72e17aec297fa3b3c6a14799e4333b60ed2e297c0c4dec4f8695ceffa4920f1b",
+  "preflight": "afb2120702d527fb49fd030278c17c82b3bcd07f04716ceb34a839e1e1446f2d"
+ },
+ "sections_code_only": {
+  "arguments": "6ec0abde475557a4a115e7bf1f1e703065513517e2240fdd8328fd93f150d5e4",
+  "assembly": "588327f3e18d10369001d6467f5ce1005a797990357b61929167752ca53c2ed1",
+  "head": "b484b231b619ada13d3b94e1fece28d51089f57a0bd00f614796ce7a8e73b270",
+  "postflight": "d3209da1735e3ff2ae0b95c7c7d736a157c3a45cf1dd0e985cdcb69f11868a01",
+  "preflight": "0f487e04b782899bec475c6aecee2887b814e285578d05fd1b0df1e4a5445a56"
+ },
+ "sha256": "dfa075b96ca0cb1cfc8eabbf06c3bfab9e22257bfdb9eb648d9d7656d0086d4a",
+ "version": "1.6.2"
+}

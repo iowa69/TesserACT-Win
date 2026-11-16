@@ -1,0 +1,9 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/trunc_gz/trunc_1.fq.gz + fixtures/trunc_gz/trunc_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 1 failed, 0 warnings
+[vanilla assembly] out/trunc_gz/run_force_gs0.3
+  FAIL   exit status            1 (see out/trunc_gz/run_force_gs0.3.log)
+
+postflight: 1 failed, 0 warnings (details above; this text is in out/trunc_gz/run_force_gs0.3/SUMMARY.txt)

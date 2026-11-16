@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+# The goldens and the canned engine folders are compared byte for byte, and some of them hold
+# CR or CRLF on purpose: git must never convert their line ends, on any platform.
+golden/** -text
+fake_asm/cases/** -text
+FIXTURES.sha256 text eol=lf
+*.sh text eol=lf
+*.py text eol=lf

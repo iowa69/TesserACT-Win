@@ -1,0 +1,4 @@
+TesserACT 1.6.2 preflight: fixtures/gz_trailing_garbage/garbage_1.fq.gz + fixtures/gz_trailing_garbage/garbage_2.fq.gz
+  FAIL   gzip                   'fixtures/gz_trailing_garbage/garbage_1.fq.gz' is truncated or corrupt (gzip -t failed)
+  FAIL   gzip                   'fixtures/gz_trailing_garbage/garbage_2.fq.gz' is truncated or corrupt (gzip -t failed)
+preflight: 2 failed, 0 warnings

@@ -1,0 +1,5 @@
+TesserACT 1.6.2 preflight: fixtures/same_file/same_1.fq.gz + fixtures/same_file/symlink_to_same_1.fq.gz
+  OK     gzip                   'same_1.fq.gz' is complete
+  OK     gzip                   'symlink_to_same_1.fq.gz' is complete
+  FAIL   pairing                -1 and -2 are the same file
+preflight: 1 failed, 0 warnings

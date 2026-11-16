@@ -1,0 +1,12 @@
+TesserACT 1.6.2 preflight: fixtures/threshold_over/over_1.fq.gz + fixtures/threshold_over/over_2.fq.gz
+  OK     gzip                   'over_1.fq.gz' is complete
+  OK     gzip                   'over_2.fq.gz' is complete
+  OK     format                 40000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 30 bp, mean 30.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  WARN   adapters               5.0% of read pairs carry Illumina adapter sequence: trim them first (fastp, cutadapt)
+  WARN   poly-G                 2.0% of read pairs end in a poly-G run (two-colour chemistry): consider fastp --trim_poly_g
+  WARN   N bases                5.0% of bases are N
+preflight: 0 failed, 4 warnings

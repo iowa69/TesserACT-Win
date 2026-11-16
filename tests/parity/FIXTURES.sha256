@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 IOWA-BioTech - Giovanni Lorenzin
+# sha256 over the decompressed content of fixtures/ (harness.manifest_digest). The goldens were
+# captured from exactly these read sets; make_fixtures.py must keep writing them.
+51c15af9c32e834a49644e0d927c82e706be6435cba856bc840aafb6ef42b9bd

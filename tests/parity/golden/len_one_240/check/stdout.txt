@@ -1,0 +1,11 @@
+TesserACT 1.6.2 preflight: fixtures/len_one_240/len240_1.fq.gz + fixtures/len_one_240/len240_2.fq.gz
+  OK     gzip                   'len240_1.fq.gz' is complete
+  OK     gzip                   'len240_2.fq.gz' is complete
+  OK     format                 2000 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 240 bp, mean 134.8 bp (long-read MiSeq-type library: 2x250/2x300)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 0 failed, 1 warnings

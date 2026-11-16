@@ -1,0 +1,4 @@
+awk: cmd. line:1: fatal: division by zero attempted
+/work/tesseract-1.6.2/tesseract: line 230: [: : integer expression expected
+/work/tesseract-1.6.2/tesseract: line 231: [: : integer expression expected
+/work/tesseract-1.6.2/tesseract: line 232: [: : integer expression expected

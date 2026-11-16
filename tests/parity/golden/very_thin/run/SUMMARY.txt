@@ -1,0 +1,15 @@
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/very_thin/run
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  OK     contigs.fasta          17 contigs, 2174 bp; largest 150; N50 126 (L50 8); N90 110 (L90 16)
+  OK     self-check             k-mer completeness 0.00000, QV 99.00; no high-copy sequence lost
+  OK     circles                0 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+  WARN   thin data              the default k ladder assembled almost nothing; this result uses k = 21,33,55 (the first attempt is in attempt1_default_k/). Expect a fragmented assembly: sequence more deeply if you can
+
+postflight: 0 failed, 1 warnings (details above; this text is in out/very_thin/run/SUMMARY.txt)

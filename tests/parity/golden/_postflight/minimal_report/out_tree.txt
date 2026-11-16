@@ -1,0 +1,7 @@
+./SUMMARY.txt
+./assembly.log
+./assembly_graph.gfa
+./assembly_stats.tsv
+./contigs.fasta
+./preflight.txt
+./report.json

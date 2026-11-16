@@ -1,0 +1,8 @@
+-1
+fixtures/very_thin/verythin_1.fq.gz
+-2
+fixtures/very_thin/verythin_2.fq.gz
+-o
+out/_postflight/run_word_and_threads
+-t
+08

@@ -1,0 +1,8 @@
+-1
+fixtures/dir with space/my reads_1.fq.gz
+-2
+fixtures/dir with space/my reads_2.fq.gz
+-o
+out/dir with space/run stub engine
+-t
+4

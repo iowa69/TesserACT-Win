@@ -14,13 +14,12 @@
 // ::environ, localtime_r, realpath, ts::util::*). On Linux they therefore test glibc and the
 // upstream code, on Windows the compatibility layer, and the two outputs can be compared line by
 // line. Lines that differ by design: platform, sizeof_long (8 on Linux, 4 on Windows).
-// thread_stack_4m is "skipped" on a Linux system whose threads get less than 6 MiB of stack.
 #include "ts_selftest.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
-#ifdef __linux__
+#ifndef _WIN32
 #  include <pthread.h>
 #endif
 
@@ -234,47 +233,49 @@ unsigned long long burnStack(int depth, unsigned long long seed) {
     return below + pad[((seed >> 33) % (sizeof pad / 64)) * 64];      // read after the call: no tail call
 }
 
-// How much stack the calling thread has; 0 when that cannot be told.
-size_t threadStackBytes() {
-#ifdef __linux__
-    pthread_attr_t attr;
-    if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;
-    void* base = nullptr;
-    size_t size = 0;
-    if (pthread_attr_getstack(&attr, &base, &size) != 0) size = 0;
-    pthread_attr_destroy(&attr);
-    return size;
-#else
-    return 0;
-#endif
+struct StackWalk {
+    int levels;
+    unsigned long long sum;
+    bool walked;
+};
+
+void walkStack(StackWalk* walk) {
+    walk->sum = gBurnStack(walk->levels, 0x9E3779B97F4A7C15ULL);
+    walk->walked = true;
 }
 
+#ifndef _WIN32
+void* walkStackOnThread(void* walk) {
+    walkStack(static_cast<StackWalk*>(walk));
+    return nullptr;
+}
+#endif
+
 void probeThreadStack() {
-    const int levels = 4096;
-    bool walked = false;
-    unsigned long long sum = 0;
-    size_t have = 0;
+    StackWalk walk{4096, 0, false};
     std::fprintf(stderr, "ts_compat selftest: walking %d levels (over 4 MiB) of stack on a worker thread; if the "
-                         "program ends here, threads do not get the stack the gap filler needs\n", levels);
+                         "program ends here, threads do not get the stack the gap filler needs\n", walk.levels);
     std::fflush(stdout);                         // what was printed so far survives a stack overflow
     std::fflush(stderr);
-    std::thread worker([&]() {
-        have = threadStackBytes();
 #ifdef _WIN32
-        const bool roomy = true;                 // the very thing to prove: the 16 MiB reach every thread
-#else
-        const bool roomy = have >= (static_cast<size_t>(6) << 20);
-#endif
-        if (!roomy) return;
-        sum = gBurnStack(levels, 0x9E3779B97F4A7C15ULL);
-        walked = true;
-    });
+    // An ordinary std::thread, started as the engine starts its workers: the very thing to prove
+    // is that the 16 MiB of the linker reach every thread.
+    std::thread worker(walkStack, &walk);
     worker.join();
-    if (!walked) {
-        std::fprintf(stderr, "ts_compat selftest: thread stack walk skipped, a thread has %llu bytes of stack here\n",
-                     static_cast<unsigned long long>(have));
+#else
+    // The reference. glibc sizes a thread from `ulimit -s` (8 MiB as a rule, 2 MiB when that is
+    // "unlimited"); the usual 8 MiB are asked for, so the answer does not depend on the shell.
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) == 0) {
+        pthread_t worker;
+        if (pthread_attr_setstacksize(&attr, static_cast<size_t>(8) << 20) == 0 &&
+            pthread_create(&worker, &attr, walkStackOnThread, &walk) == 0) {
+            pthread_join(worker, nullptr);
+        }
+        pthread_attr_destroy(&attr);
     }
-    probe("thread_stack_4m", walked ? "1" : "skipped", walked ? sum != 0 : true);
+#endif
+    probeBool("thread_stack_4m", walk.walked && walk.sum != 0);
 }
 
 void probeFiles(const std::string& work) {
@@ -311,12 +312,15 @@ void probeFiles(const std::string& work) {
         out << "a\n";
     }
     probe("ofstream_newline_bytes", num(bytesIn(t2)), bytesIn(t2) == 2);
+    const std::string t3 = work + "/mode_read.txt", t4 = work + "/cov.txt";
     {
         // ... and a reader must see the bytes that are in the file ("\r\n" stays, 0x1A is no end of file)
-        const std::string t3 = work + "/mode_read.txt";
         writeWith(t3, "wb", "x\r\n\x1Ay\n");
-        std::ifstream in(t3);
-        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string got;
+        {
+            std::ifstream in(t3);
+            got.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        }                                        // closed before the file is deleted: Windows keeps an open file
         probe("ifstream_raw_bytes", num(static_cast<long long>(got.size())), got == "x\r\n\x1Ay\n");
         std::string viaR;
         if (std::FILE* f = std::fopen(t3.c_str(), "r")) {
@@ -329,7 +333,6 @@ void probeFiles(const std::string& work) {
     }
     {
         // the FASTA header of every contig is written with fprintf("%.4f")
-        const std::string t4 = work + "/cov.txt";
         volatile double cov = 24.86445;
         if (std::FILE* f = std::fopen(t4.c_str(), "wb")) {
             std::fprintf(f, ">NODE_1_length_%zu_cov_%.4f\n", static_cast<size_t>(1234), static_cast<double>(cov));
@@ -353,8 +356,8 @@ void probeFiles(const std::string& work) {
         const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         probeBool("unicode_ifstream_roundtrip", got == "hello\n");
     }
+    const std::string gz = uni + "/reads \xC3\xA9.fq.gz";
     {
-        const std::string gz = uni + "/reads \xC3\xA9.fq.gz";
         const char text[] = "@r1\nACGT\n+\nIIII\n";
         bool ok = false;
         if (gzFile out = gzopen(gz.c_str(), "wb")) {
@@ -381,10 +384,18 @@ void probeFiles(const std::string& work) {
     const std::string nested = work + "/n1/n2/n3";
     probeBool("makedirs_nested", ts::util::makeDirs(nested) && ts::util::fileExists(nested));
 
-    // ---- clean up; whatever is left behind is a failure of its own
-    for (const std::string& f : {uf, a, b, t1, t2}) removeFile(f);
-    for (const std::string& d : {uni, nested, work + "/n1/n2", work + "/n1", work}) removeDir(d);
-    probeBool("cleanup", !ts::util::fileExists(work));
+    // ---- clean up; whatever is left behind is a failure of its own, and is named
+    const std::vector<std::string> files = {uf, gz, a, b, sparse, t1, t2, t3, t4};
+    const std::vector<std::string> folders = {uni, nested, work + "/n1/n2", work + "/n1", work};
+    for (const std::string& f : files) removeFile(f);
+    for (const std::string& d : folders) removeDir(d);
+    std::string left;
+    for (const std::vector<std::string>* group : {&files, &folders}) {
+        for (const std::string& p : *group) {
+            if (ts::util::fileExists(p)) left += (left.empty() ? "still there: " : ", ") + p;
+        }
+    }
+    probeBool("cleanup", !ts::util::fileExists(work), left);
 }
 
 }  // namespace

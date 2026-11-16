@@ -1,0 +1,1 @@
+/work/tesseract-1.6.2/tesseract: line 355: out/_postflight/missing_report_gfa/report.json: No such file or directory

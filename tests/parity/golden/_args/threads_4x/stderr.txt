@@ -1,0 +1,1 @@
+tesseract: -t needs a positive integer

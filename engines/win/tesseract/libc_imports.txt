@@ -135,3 +135,9 @@ ftruncate
 gzwrite
 malloc
 rmdir
+# ... whose stack probe starts one thread with a stack of 8 MiB, whatever `ulimit -s` says
+pthread_attr_destroy
+pthread_attr_init
+pthread_attr_setstacksize
+pthread_create
+pthread_join

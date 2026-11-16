@@ -1,0 +1,28 @@
+TesserACT 1.6.2 preflight: fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  OK     gzip                   'verythin_1.fq.gz' is complete
+  OK     gzip                   'verythin_2.fq.gz' is complete
+  OK     format                 300 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 150 bp, mean 150.0 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 0x for a 5 Mb genome (assumed; set --genome-size for a better estimate): too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+  OK     disk                   7 GB free in out/_postflight/odd_headers
+  OK     memory                 8 GB available
+preflight: 0 failed, 1 warnings
+assembling into out/_postflight/odd_headers (vanilla) ...
+TesserACT 1.6.2 run summary
+  reads    fixtures/very_thin/verythin_1.fq.gz + fixtures/very_thin/verythin_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2-fake
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 0 failed, 1 warnings
+[vanilla assembly] out/_postflight/odd_headers
+  OK     exit status            0
+  OK     scaffolds.fasta        not written: every scaffold join was closed with sequence, contigs.fasta is complete
+  FAIL   contigs.fasta          malformed: 1 duplicate names, 0 empty records, 0 lines with non-ACGTN characters
+  OK     self-check             k-mer completeness 0.99871, QV 47.13; no high-copy sequence lost
+  OK     circles                0 replicons written circular (read-verified join), 0 circle candidates failed verification and were written linear
+  OK     map-back               skipped: install bwa or minimap2 to measure how many reads map back
+
+postflight: 1 failed, 0 warnings (details above; this text is in out/_postflight/odd_headers/SUMMARY.txt)

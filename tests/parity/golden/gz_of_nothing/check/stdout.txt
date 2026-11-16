@@ -1,0 +1,5 @@
+TesserACT 1.6.2 preflight: fixtures/gz_of_nothing/gzempty_1.fq.gz + fixtures/gz_of_nothing/gzempty_2.fq.gz
+  OK     gzip                   'gzempty_1.fq.gz' is complete
+  OK     gzip                   'gzempty_2.fq.gz' is complete
+  FAIL   format                 no FASTQ records read
+preflight: 1 failed, 0 warnings

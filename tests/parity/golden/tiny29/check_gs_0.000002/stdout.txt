@@ -1,0 +1,9 @@
+TesserACT 1.6.2 preflight: fixtures/tiny29/tiny_1.fq + fixtures/tiny29/tiny_2.fq
+  OK     format                 1 read pairs, every record well-formed
+  OK     pairing                mate names agree on every pair
+  OK     quality                Phred+33 (codes 73-73 / 73-73)
+  OK     read length            max 15 bp, mean 14.5 bp (short-read library: 2x150 or shorter)
+  WARN   depth                  about 14x for a 0.000002 Mb genome: too thin for a reliable assembly; expect many breaks
+  OK     adapters               0.00% of read pairs with adapter read-through
+  OK     poly-G                 0.00% of read pairs end in a poly-G run
+preflight: 0 failed, 1 warnings

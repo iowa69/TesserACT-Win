@@ -1,0 +1,16 @@
+TesserACT 1.6.2 preflight: fixtures/trunc_gz/trunc_1.fq.gz + fixtures/trunc_gz/trunc_2.fq.gz
+  OK     gzip                   'trunc_1.fq.gz' is complete
+  FAIL   gzip                   'fixtures/trunc_gz/trunc_2.fq.gz' is truncated or corrupt (gzip -t failed)
+  OK     disk                   7 GB free in out/trunc_gz/run_force
+  OK     memory                 9 GB available
+preflight: 1 failed, 0 warnings
+assembling into out/trunc_gz/run_force (vanilla) ...
+TesserACT 1.6.2 run summary
+  reads    fixtures/trunc_gz/trunc_1.fq.gz + fixtures/trunc_gz/trunc_2.fq.gz
+  version  tesseract 1.6.2, engine TesserACT 1.6.2
+  settings standard (read-verified circles, library check, PhiX label, small-plasmid recovery, self-check)
+  preflight preflight: 1 failed, 0 warnings
+[vanilla assembly] out/trunc_gz/run_force
+  FAIL   exit status            1 (see out/trunc_gz/run_force.log)
+
+postflight: 1 failed, 0 warnings (details above; this text is in out/trunc_gz/run_force/SUMMARY.txt)
