@@ -50,19 +50,26 @@ is needed. The folder can live anywhere, including a USB stick.
 
 ## Four steps
 
+*The screenshots use made-up sample names.*
+
 ### 1. Samples
+
+![The Samples page: a list of samples with their read files, and the results folder](docs/img/1-samples.png)
 
 Add files, add a folder, or drop them on the window. Each sample needs two files: Read 1
 and Read 2. The program pairs them by name (`_R1`/`_R2`, `_1`/`_2`, and Illumina's
 `_S1_L001_R1_001`), joins the lanes of a sample that was sequenced over several, and
 tells you at once about any file it cannot use and why.
 
-Choose the results folder. Every sample gets its own folder there.
+Choose the results folder. Every sample gets its own folder there, and the page shows
+how much space the run needs against what is free.
 
 New here? **Try the example** runs a small made-up isolate through the whole program in
 about a minute.
 
 ### 2. Trimming (optional)
+
+![The Trimming page: the standard options, already ticked](docs/img/2-trimming.png)
 
 The standard settings are already ticked: remove adapters, trim low-quality ends, remove
 poor and very short reads, trim poly-G tails. They are scepter's settings for assembly.
@@ -71,20 +78,36 @@ assemble its reads as they are.
 
 ### 3. Assembly (optional)
 
+![The Assembly page](docs/img/3-assembly.png)
+
 The standard settings suit most bacterial isolates. Say the genome size if you know it,
 or leave out very short contigs. Assembly mode, scaffolding, polishing and the number of
 processor threads are under **More options**.
 
 ### 4. Start
 
-Press **Start** on any of the first three pages. Samples are trimmed and assembled one at
-a time, each using every processor thread. You can lock the screen and leave it.
+Press **Start** on any of the first three pages: it starts at once. Samples are trimmed
+and assembled one at a time, each using every processor thread. You can lock the screen
+and leave it.
 
-- **Stop** asks first, and tells you what would be lost.
-- If a sample already has an assembly in the results folder, the program asks whether to
-  **skip** it or **overwrite** it. An old result is replaced only when its new one is ready.
-- After a stop, a crash or a restart of Windows, **Continue** picks the run up where it
-  was. Finished samples are never done twice.
+![The Run page while a sample is being assembled](docs/img/4-run.png)
+
+**Stop** asks first, and tells you what would be lost:
+
+![The Stop question: keep running, stop after this sample, or stop now](docs/img/5-stop.png)
+
+If a sample already has an assembly in the results folder, the program asks whether to
+**skip** it or **overwrite** it. An old result is replaced only when its new one is ready:
+
+![The question about samples that are already assembled: skip or overwrite](docs/img/6-overwrite.png)
+
+When the run has finished, the page says what happened to every sample, with the reason
+and the next step for any that failed:
+
+![The Run page after the run: counts, where the results are, and the reason for each failure](docs/img/7-finished.png)
+
+After a stop, a crash or a restart of Windows, **Continue** picks the run up where it
+was. Finished samples are never done twice.
 
 ---
 
