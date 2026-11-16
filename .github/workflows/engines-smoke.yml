@@ -42,7 +42,6 @@ jobs:
 
   windows:
     runs-on: windows-2022
-    needs: linux
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -68,13 +67,6 @@ jobs:
       - name: Self-tests, trimming and assembly of the example
         shell: pwsh
         run: python engines/smoke.py run --engines build/engines/windows --out build/smoke-windows.json
-      - uses: actions/download-artifact@v4
-        with:
-          name: smoke-linux
-          path: build/linux
-      - name: Same output as Linux
-        shell: pwsh
-        run: python engines/smoke.py compare build/linux/smoke-linux.json build/smoke-windows.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -85,3 +77,20 @@ jobs:
             build/engines/windows/*.exe
             build/logs
             build/smoke
+
+  compare:
+    name: Same output on Windows as on Linux
+    runs-on: ubuntu-24.04
+    needs: [linux, windows]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-linux
+          path: build/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-windows
+          path: build/windows
+      - run: python3 engines/smoke.py compare build/linux/smoke-linux.json build/windows/smoke-windows.json

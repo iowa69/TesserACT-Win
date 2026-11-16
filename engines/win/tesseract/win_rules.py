@@ -85,7 +85,9 @@ def _files(root, patterns):
     base = glob.escape(root)
     for pattern in patterns:
         target = drop if pattern.startswith("!") else keep
-        target.update(glob.glob(os.path.join(base, pattern.lstrip("!"))))
+        # normpath: on Windows a pattern with a wildcard comes back with "\\" and a literal
+        # one with "/", so without it the "!" exclusions would never match.
+        target.update(os.path.normpath(p) for p in glob.glob(os.path.join(base, pattern.lstrip("!"))))
     return sorted(keep - drop)
 
 
