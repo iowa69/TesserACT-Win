@@ -176,7 +176,7 @@ jobs:
         run: |
           $work = Join-Path $env:RUNNER_TEMP "Prova à côté"
           New-Item -ItemType Directory -Force -Path $work | Out-Null
-          Expand-Archive -Path (Get-ChildItem release\*.zip).FullName -DestinationPath $work
+          Expand-Archive -Path (Get-ChildItem release\*-win64-portable.zip | Sort-Object Name | Select-Object -Last 1).FullName -DestinationPath $work
           $exe = Join-Path $work "TesserACT-Win\TesserACT-Win.exe"
           $report = Join-Path $work "selftest.txt"
           $results = Join-Path $work "Risultati di prova"

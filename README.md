@@ -20,8 +20,10 @@ samples as you give it, one after another.
 
 ## Download
 
-Go to the [latest release](https://github.com/iowa69/TesserACT-Win/releases/latest) and
-take the file ending `-win64-portable.zip`.
+### [⬇ Download TesserACT-Win for Windows](https://github.com/iowa69/TesserACT-Win/releases/latest/download/TesserACT-Win-win64-portable.zip)
+
+This link always gives the newest version. Older versions and checksums are on the
+[releases page](https://github.com/iowa69/TesserACT-Win/releases).
 
 1. **Extract the whole zip** (right-click, *Extract All...*). Do not start the program
    from inside the zip.

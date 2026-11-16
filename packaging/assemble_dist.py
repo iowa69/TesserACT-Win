@@ -104,8 +104,14 @@ def main(argv=None) -> int:
             with open(full, "rb") as handle:
                 archive.writestr(info, handle.read(), compresslevel=9)
 
+    # The same zip under a name without the version, so that one link
+    # (releases/latest/download/<this name>) always gives the newest release.
+    latest_name = "%s-win64-portable.zip" % TOP
+    shutil.copyfile(zip_path, os.path.join(args.release, latest_name))
+
     with open(os.path.join(args.release, "SHA256SUMS.txt"), "w", encoding="ascii", newline="\n") as handle:
         handle.write("%s  %s\n" % (sha256(zip_path), zip_name))
+        handle.write("%s  %s\n" % (sha256(zip_path), latest_name))
         for name in ENGINE_FILES[:2]:
             handle.write("%s  %s/engines/%s\n" % (sha256(os.path.join(engines_out, name)), TOP, name))
         handle.write("%s  %s/%s.exe\n" % (sha256(exe), TOP, TOP))
