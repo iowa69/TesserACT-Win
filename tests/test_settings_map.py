@@ -370,13 +370,14 @@ ASM_IO = dict(read1="trimming/KP_1_trimmed_R1.fastq.gz", read2="trimming/KP_1_tr
 def test_standard_assembly_adds_nothing():
     cmd = sm.tesseract_command("tesseract-asm", AssemblySettings(threads=8), **ASM_IO)
     assert cmd == ["tesseract-asm", "-1", "trimming/KP_1_trimmed_R1.fastq.gz",
-                   "-2", "trimming/KP_1_trimmed_R2.fastq.gz", "-o", "assembly", "-t", "8"]
+                   "-2", "trimming/KP_1_trimmed_R2.fastq.gz", "-o", "assembly", "-t", "8", "--no-polish"]
     cmd = sm.tesseract_command("tesseract-asm", AssemblySettings(), **ASM_IO)
-    assert cmd[-2:] == ["-t", str(default_threads())] and len(cmd) == 9
+    assert cmd[-3:] == ["-t", str(default_threads()), "--no-polish"] and len(cmd) == 10
 
 
 def test_assembly_options():
     def extra(**kw):
+        kw.setdefault("polish", True)        # polishing is off by default; the other options alone
         return sm.tesseract_command("asm", AssemblySettings(threads=4, **kw), **ASM_IO)[9:]
 
     assert extra(mode="careful") == ["--mode", "careful"]
@@ -395,7 +396,7 @@ def test_assembly_options():
 def test_genome_size_and_force_are_not_engine_options():
     asm = AssemblySettings(threads=4, know_genome_size=True, genome_size_mb=2.8, force=True)
     cmd = sm.tesseract_command("asm", asm, **ASM_IO)
-    assert cmd == ["asm", "-1", ASM_IO["read1"], "-2", ASM_IO["read2"], "-o", "assembly", "-t", "4"]
+    assert cmd == ["asm", "-1", ASM_IO["read1"], "-2", ASM_IO["read2"], "-o", "assembly", "-t", "4", "--no-polish"]
     assert sm.expected_genome_size_mb(asm) == 2.8
     assert sm.expected_genome_size_mb(AssemblySettings()) is None
     assert sm.expected_genome_size_mb(AssemblySettings(genome_size_mb=2.8)) is None
@@ -476,9 +477,9 @@ def test_describe():
     # Keeping or deleting the trimmed reads, and unused numbers, do not change the trimming.
     assert sm.describe(change(keep_trimmed_reads=False, trim_front=9), eight, True).startswith(
         "standard trimming")
-    two = AssemblySettings(threads=8, mode="fast", polish=False)
-    assert sm.describe(TrimSettings(), two, True) == "standard trimming, mode Fast, no polishing, 8 threads"
-    many = AssemblySettings(threads=8, mode="fast", polish=False, scaffold=False)
+    two = AssemblySettings(threads=8, mode="fast", polish=True)
+    assert sm.describe(TrimSettings(), two, True) == "standard trimming, mode Fast, with polishing, 8 threads"
+    many = AssemblySettings(threads=8, mode="fast", polish=True, scaffold=False)
     assert sm.describe(TrimSettings(), many, True) == "standard trimming, assembly changed, 8 threads"
 
 
@@ -509,7 +510,7 @@ def test_differences_one_phrase_per_changed_setting():
         (dict(drop_short_contigs=True), "contigs shorter than 500 bases left out"),
         (dict(mode="careful"), "mode Careful"),
         (dict(scaffold=False), "no scaffolding"),
-        (dict(polish=False), "no polishing"),
+        (dict(polish=True), "with polishing"),
         (dict(force=True), "assembled even if the read check fails"),
     ]
     for kw, phrase in asm_each:
@@ -539,7 +540,7 @@ def test_fingerprint_is_stable_and_short():
     assert first == sm.settings_fingerprint(TrimSettings(), AssemblySettings(), True)
     assert first.startswith("s1-") and len(first) == 19
     # A fixed value: the fingerprint must not change from one release or Python to the next.
-    assert first == "s1-30f89624050d4096"
+    assert first == "s1-66c2249353ac7c9c"     # polishing off by default since 0.2.0
 
 
 def test_fingerprint_ignores_what_cannot_change_a_result():
@@ -580,7 +581,7 @@ def test_fingerprint_changes_with_every_setting_that_matters():
             AssemblySettings(drop_short_contigs=True), AssemblySettings(drop_short_contigs=True, min_contig=501),
             AssemblySettings(mode="fast"), AssemblySettings(mode="careful"),
             AssemblySettings(mode="aggressive"), AssemblySettings(scaffold=False),
-            AssemblySettings(polish=False)]
+            AssemblySettings(polish=True)]
     for asm in asms:
         seen.add(sm.settings_fingerprint(TrimSettings(), asm, True))
     seen.add(sm.settings_fingerprint(TrimSettings(), AssemblySettings(), False))
@@ -815,10 +816,10 @@ def test_assembler_takes_the_standard_command_and_the_environment(reads, tmp_pat
     dirty = {**os.environ, "TESSERACT_FOO": "1", "TESSERACT_P2_CIRC": "banana"}
     code, log, report, cmd = _assemble(engines, AssemblySettings(threads=2), reads, tmp_path / "s p é", dirty)
     assert code == 0, log[-2000:]
-    assert cmd[1:] == ["-1", reads[0], "-2", reads[1], "-o", "assembly", "-t", "2"]
+    assert cmd[1:] == ["-1", reads[0], "-2", reads[1], "-o", "assembly", "-t", "2", "--no-polish"]
     assert "TESSERACT_FOO" not in log and "is not valid" not in log
     assert "\x1b[" not in log
-    assert report["command"].endswith(" -o assembly -t 2")
+    assert report["command"].endswith(" -o assembly -t 2 --no-polish")
     assert report["mode"] == "standard" and report["threads"] == 2
     assert report["p2"]["enabled"] == 1                       # the wrapper's profile is in force
     if engines.detect_sketch:

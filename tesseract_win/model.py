@@ -6,8 +6,9 @@ Nothing here does any work. Every other module imports its types from this file,
 so a name or a default changed here changes it everywhere.
 
 Standard settings are the dataclass defaults. ``TrimSettings()`` is exactly
-scepter's ``assembly`` preset; ``AssemblySettings()`` is exactly what the Ubuntu
-``tesseract`` command runs with no options.
+scepter's ``assembly`` preset; ``AssemblySettings()`` is what the Ubuntu
+``tesseract`` command runs with no options, except that the final polishing step is off
+(the owner's choice for this program; tick it under More options to have it).
 """
 
 from __future__ import annotations
@@ -110,6 +111,7 @@ class Sample:
     size_bytes: int = 0
     state: SampleState = SampleState.READY
     note: str = ""
+    assemble: bool = True          # unticked: the sample is trimmed only
 
     @property
     def ready(self) -> bool:
@@ -132,7 +134,8 @@ class Sample:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Sample":
         return cls(name=d["name"], lanes=[(a, b) for a, b in d.get("lanes", [])],
-                   trim=bool(d.get("trim", True)), size_bytes=int(d.get("size_bytes", 0)),
+                   trim=bool(d.get("trim", True)), assemble=bool(d.get("assemble", True)),
+                   size_bytes=int(d.get("size_bytes", 0)),
                    state=SampleState(d.get("state", "ready")), note=d.get("note", ""))
 
 
@@ -185,7 +188,7 @@ class AssemblySettings:
     # --- More options
     mode: str = "standard"                  # one of ASSEMBLY_MODES; not "standard": --mode <mode>
     scaffold: bool = True                   # unticked: --no-scaffold
-    polish: bool = True                     # unticked: --no-polish
+    polish: bool = False                    # unticked (the standard here): --no-polish
     force: bool = False                     # assemble even if the read check fails
     threads: int = field(default_factory=default_threads)
 

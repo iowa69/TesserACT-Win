@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+title: "TesserACT-Win: trim and assemble bacterial genomes on Windows"
+message: "If you use this software, please cite it as below, together with TesserACT."
+type: software
+authors:
+  - family-names: Lorenzin
+    given-names: Giovanni
+    affiliation: IOWA-BioTech
+repository-code: "https://github.com/iowa69/TesserACT-Win"
+license: MIT
+version: 0.2.0
+date-released: 2026-11-16

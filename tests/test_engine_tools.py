@@ -155,7 +155,7 @@ def test_the_tool_passes_what_the_program_passes():
     assert equivalence.PROFILE == dict(settings_map.PROFILE_ENVIRONMENT)
     assembly = settings_map.tesseract_command("asm", model.AssemblySettings(threads=THREADS), read1="a", read2="b",
                                               out_dir_name="assembly")
-    assert assembly == ["asm", "-1", "a", "-2", "b", "-o", "assembly", "-t", str(THREADS)]
+    assert assembly == ["asm", "-1", "a", "-2", "b", "-o", "assembly", "-t", str(THREADS), "--no-polish"]
     assert equivalence.RETRY_KMERS == postflight.RETRY_KMERS == settings_map.THIN_DATA_KMERS
     assert equivalence.FIRST_ATTEMPT_DIR == postflight.FIRST_ATTEMPT_DIR
     env = settings_map.engine_environment({"TESSERACT_X": "1", "PATH": "p"}, "sketch")

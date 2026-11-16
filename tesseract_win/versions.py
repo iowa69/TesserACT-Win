@@ -6,7 +6,7 @@ The engine values are the pins. ``engines/update.py`` rewrites them when a new u
 release is brought in; nothing else should edit them by hand.
 """
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 #: Pinned TesserACT release (engine ``tesseract-asm``), its tag and commit.
 TESSERACT_VERSION = "1.6.2"

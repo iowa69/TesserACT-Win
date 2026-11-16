@@ -498,8 +498,8 @@ class Theme:
         st.layout("Disclosure.TButton", self._wrap("Tw.Tool.bg", *label_in_padding))
         st.layout("Link.TButton", self._wrap("Tw.Link.bg", *label_in_padding))
         self._set("TButton", background=p.surface, foreground=p.text, font=f["body"],
-                  padding=(px(14), px(6)), anchor="center", width=-8)
-        self._set("Primary.TButton", foreground=p.on_accent, font=f["heading"], padding=(px(22), px(8)))
+                  padding=(px(18), px(9)), anchor="center", width=-9)
+        self._set("Primary.TButton", foreground=p.on_accent, font=f["heading"], padding=(px(28), px(11)))
         self._set("Danger.TButton", foreground=p.bad)
         self._set("Default.TButton", foreground=p.accent if self.dark else p.accent_active)
         self._set("Tool.TButton", foreground=p.text_soft, padding=(px(8), px(5)), width=0)
@@ -551,7 +551,7 @@ class Theme:
         ], border=field_edge, sticky="nsew")
         st.layout("TEntry", self._wrap("Tw.Entry.field", "Entry.padding", "Entry.textarea"))
         self._set("TEntry", background=p.surface, foreground=p.text, insertcolor=p.text,
-                  insertwidth=max(1, self.hair), padding=(px(8), px(6)),
+                  insertwidth=max(1, self.hair), padding=(px(10), px(9)),
                   selectbackground=p.accent, selectforeground=p.on_accent)
         st.map("TEntry", selectbackground=[("!focus", p.surface_alt)], selectforeground=[("!focus", p.text)])
         # the field laid over a table cell while a name is edited: no room for padding
@@ -678,7 +678,7 @@ class Theme:
         try:
             field_height = probe_field.winfo_reqheight()
             extra = field_height - probe_button.winfo_reqheight()
-            side, top = self.px(14), self.px(6)
+            side, top = self.px(18), self.px(9)
             if extra:
                 top_pad = max(1, top + extra // 2)
                 bottom_pad = max(1, top + extra - extra // 2)

@@ -564,8 +564,8 @@ def _assembly_differences(assembly: AssemblySettings) -> List[str]:
         out.append("mode %s" % str(assembly.mode).capitalize())
     if not assembly.scaffold:
         out.append("no scaffolding")
-    if not assembly.polish:
-        out.append("no polishing")
+    if assembly.polish:
+        out.append("with polishing")
     return out
 
 

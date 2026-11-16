@@ -620,7 +620,7 @@ def assemble(asm: str, sketch: str, read1: str, read2: str, work: str, threads: 
         extra["TESSERACT_P2_DETECT_REPORT"] = "1"
         extra["TESSERACT_P2_DETECT_SKETCH"] = sketch
     env = clean_env(extra)
-    base = [asm, "-1", read1, "-2", read2, "-o", "assembly", "-t", str(threads)]
+    base = [asm, "-1", read1, "-2", read2, "-o", "assembly", "-t", str(threads), "--no-polish"]
     log = os.path.join(out, "assembly.log")
     started = time.monotonic()
     record: dict = {"exit": run_logged(base, work, env, log), "retried": False}

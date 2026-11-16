@@ -5,7 +5,7 @@ assemblies.
 
 No installation, no command line, no Linux, no internet connection after the download.
 
-*IOWA-BioTech — Giovanni Lorenzin*
+*Author: Giovanni Lorenzin, IOWA-BioTech*
 
 TesserACT-Win is a window around two programs, built here as native Windows programs:
 
@@ -58,13 +58,18 @@ is needed. The folder can live anywhere, including a USB stick.
 
 ![The Samples page: a list of samples with their read files, and the results folder](docs/img/1-samples.png)
 
-Add files, add a folder, or drop them on the window. Each sample needs two files: Read 1
+Add files, add a folder, or drag them onto the list. Each sample needs two files: Read 1
 and Read 2. The program pairs them by name (`_R1`/`_R2`, `_1`/`_2`, and Illumina's
 `_S1_L001_R1_001`), joins the lanes of a sample that was sequenced over several, and
 tells you at once about any file it cannot use and why.
 
-Choose the results folder. Every sample gets its own folder there, and the page shows
-how much space the run needs against what is free.
+For each sample, tick **Trim**, **Assemble** or both; **Select all** and **Deselect all** set a whole
+column at once. Each sample's results are named after its read files; type another name under
+**Output name** (or press **Change name...**), for example `experiment_1` instead of a barcode.
+
+The results go to an `assemblies` folder inside the program's own folder unless you choose
+another. Every sample gets its own folder there, and the page shows how much space the run
+needs against what is free.
 
 New here? **Try the example** runs a small made-up isolate through the whole program in
 about a minute.
@@ -82,9 +87,10 @@ assemble its reads as they are.
 
 ![The Assembly page](docs/img/3-assembly.png)
 
-The standard settings suit most bacterial isolates. Say the genome size if you know it,
-or leave out very short contigs. Assembly mode, scaffolding, polishing and the number of
-processor threads are under **More options**.
+The standard settings are the vanilla TesserACT assembly, without the final polishing step,
+and suit most bacterial isolates. Say the genome size if you know it, or leave out very short
+contigs. Assembly mode, scaffolding, polishing and the number of processor threads are under
+**More options**.
 
 ### 4. Start
 
@@ -177,6 +183,10 @@ MSYS2 UCRT64). Run the tests: `python -m pytest`. Run from source: `python -m te
 **A new TesserACT release** is brought in with one command; see
 [`engines/UPDATING.md`](engines/UPDATING.md). The build fails, and shows where, if the
 new release changed something the Windows version depends on.
+
+## Author
+
+Giovanni Lorenzin, IOWA-BioTech, is the only author of TesserACT-Win, of TesserACT and of scepter.
 
 ## Licence and citation
 

@@ -1004,7 +1004,7 @@ def test_assembly_options_change_and_reset(window, tmp_path):
     threads.commit()
     shell.settle()
     assembly = shell.state.assembly
-    assert (assembly.mode, assembly.polish, assembly.force, assembly.threads) == ("careful", False, True, 1)
+    assert (assembly.mode, assembly.polish, assembly.force, assembly.threads) == ("careful", True, True, 1)
     assert page.more.changed
     assert settings_map.validate_assembly(assembly) == []
 

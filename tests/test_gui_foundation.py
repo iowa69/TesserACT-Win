@@ -173,7 +173,7 @@ def test_steps_and_pages():
 
 
 def test_table_columns():
-    assert list(texts.SAMPLES_COLUMNS.values()) == ["Trim", "Sample", "Read 1", "Read 2", "Size", "Status"]
+    assert list(texts.SAMPLES_COLUMNS.values()) == ["Trim", "Assemble", "Output name", "Read 1", "Read 2", "Size", "Status"]
     assert list(texts.RUN_COLUMNS.values()) == ["Sample", "Status", "Contigs", "Total length", "N50", "Notes"]
     for key in list(texts.SAMPLES_COLUMNS) :
         assert ("%s_column" % key) in texts.HOVER

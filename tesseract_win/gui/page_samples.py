@@ -71,12 +71,16 @@ def sample_row(state: st.AppState, sample: Sample) -> Dict[str, Any]:
     suffix = _lanes_suffix(len(lanes))
     status = st.Words.CHECKING_ROW if checking else st.status_text(shown, note)
     kind = "accent" if checking else ("bad" if left_out else w.status_kind(shown))
+    assemble = bool(getattr(sample, "assemble", True))
+    nothing = sample.ready and not sample.trim and not assemble
+    boxes = not left_out or nothing
     return {
         "id": row_id,
-        "checked": None if left_out else bool(sample.trim),
+        "checked": bool(sample.trim) if boxes else None,
         "status": kind,
         "dim": left_out,
         "values": {
+            "assemble": (BOX_ON if assemble else BOX_OFF) if boxes else "",
             "sample": sample.name,
             "read1": (_file_name(first[0]) + suffix) if first[0] else "",
             "read2": (_file_name(first[1]) + suffix) if first[1] else "",
@@ -89,6 +93,10 @@ def sample_row(state: st.AppState, sample: Sample) -> Dict[str, Any]:
             "status": status,
         },
     }
+
+
+#: The Assemble box of a row, as text: the table draws only one column of real tick boxes.
+BOX_ON, BOX_OFF = "\u2611", "\u2610"
 
 
 class SamplesPage(w.Frame):
@@ -121,24 +129,10 @@ class SamplesPage(w.Frame):
         self.notices.grid(row=row, column=0, sticky="ew")
         row += 1
 
-        # ---- the buttons above the list
-        bar = w.Frame(self)
-        bar.grid(row=row, column=0, sticky="ew", pady=(0, px(8)))
-        row += 1
-        self.buttons: Dict[str, Any] = {}
-        commands = {"add_files": self.choose_files, "add_folder": self.choose_folder,
-                    "remove": self.remove_selected, "clear_list": self.clear_list}
-        for index, key in enumerate(("add_files", "add_folder", "remove", "clear_list")):
-            made = w.button(bar, texts.BUTTON[key], commands[key])
-            made.pack(side="left", padx=(0 if index == 0 else px(8), 0))
-            w.explain(made, texts.HOVER[key], self.help_line)
-            self.buttons[key] = made
-        self.names_button = w.button(bar, texts.BUTTON["make_names_different"], self.make_names_different)
-        w.explain(self.names_button, texts.HOVER["make_names_different"], self.help_line)
-
         # ---- the list
         names = texts.SAMPLES_COLUMNS
         columns = [
+            w.Column("assemble", names["assemble"], width=78, anchor="center", hover=texts.HOVER["assemble_column"]),
             w.Column("sample", names["sample"], width=150, editable=True, shorten="middle",
                      hover=texts.HOVER["sample_column"]),
             w.Column("read1", names["read1"], width=176, shorten="middle", hover=texts.HOVER["read1_column"]),
@@ -159,21 +153,15 @@ class SamplesPage(w.Frame):
         self._set_empty_state()
         self.table.tree.bind("<FocusOut>", lambda _e: self.help_line.clear_focus(owner=self.table.tree), add="+")
         self.table.tree.bind("<FocusIn>", lambda _e: self._explain_selection(), add="+")
+        self.table.tree.bind("<Button-1>", self._clicked_assemble, add="+")
 
         # ---- under the list
         under = w.Frame(self)
         under.grid(row=row, column=0, sticky="ew", pady=(px(8), 0))
         row += 1
         under.columnconfigure(3, weight=1)
-        w.label(under, texts.TRIMMING_LABEL, "soft").grid(row=0, column=0, sticky="w")
-        self.trim_all_button = w.button(under, texts.BUTTON["trim_all"], lambda: self.trim_all(True))
-        self.trim_all_button.grid(row=0, column=1, padx=(px(8), 0))
-        w.explain(self.trim_all_button, texts.HOVER["trim_all"], self.help_line)
-        self.trim_none_button = w.button(under, texts.BUTTON["trim_none"], lambda: self.trim_all(False))
-        self.trim_none_button.grid(row=0, column=2, padx=(px(8), 0))
-        w.explain(self.trim_none_button, texts.HOVER["trim_none"], self.help_line)
         self.activity = w.WrapLabel(under, "", "small", wrap=420)
-        self.activity.grid(row=0, column=3, sticky="ew", padx=(px(16), px(4)))
+        self.activity.grid(row=0, column=3, sticky="ew", padx=(px(4), px(4)))
         self.activity_link = w.LinkLabel(under, "", small=True)
         self.activity_link.grid(row=0, column=4, padx=(0, px(12)))
         self.activity_link.grid_remove()
@@ -181,8 +169,48 @@ class SamplesPage(w.Frame):
         self.counter.grid(row=0, column=5, sticky="e")
         self.counter_link = w.LinkLabel(under, "", self.select_left_out)
         self.counter_link.grid(row=0, column=6, sticky="e", padx=(px(4), 0))
+
+        # ---- what to do with the samples: every box at once
+        choose = w.Frame(self)
+        choose.grid(row=row, column=0, sticky="ew", pady=(px(10), 0))
+        row += 1
+        w.label(choose, texts.TRIMMING_LABEL, "bold").pack(side="left")
+        self.trim_all_button = w.button(choose, texts.BUTTON["trim_all"], lambda: self.trim_all(True))
+        self.trim_all_button.pack(side="left", padx=(px(8), 0))
+        w.explain(self.trim_all_button, texts.HOVER["trim_all"], self.help_line)
+        self.trim_none_button = w.button(choose, texts.BUTTON["trim_none"], lambda: self.trim_all(False))
+        self.trim_none_button.pack(side="left", padx=(px(8), 0))
+        w.explain(self.trim_none_button, texts.HOVER["trim_none"], self.help_line)
+        w.label(choose, texts.ASSEMBLING_LABEL, "bold").pack(side="left", padx=(px(28), 0))
+        self.assemble_all_button = w.button(choose, texts.BUTTON["assemble_all"], lambda: self.assemble_all(True))
+        self.assemble_all_button.pack(side="left", padx=(px(8), 0))
+        w.explain(self.assemble_all_button, texts.HOVER["assemble_all"], self.help_line)
+        self.assemble_none_button = w.button(choose, texts.BUTTON["assemble_none"], lambda: self.assemble_all(False))
+        self.assemble_none_button.pack(side="left", padx=(px(8), 0))
+        w.explain(self.assemble_none_button, texts.HOVER["assemble_none"], self.help_line)
         self.counter_link.grid_remove()
         w.explain(self.counter_link, texts.HOVER["left_out_link"], self.help_line)
+
+        # ---- the buttons, grouped below the list
+        bar = w.Frame(self)
+        bar.grid(row=row, column=0, sticky="ew", pady=(px(10), 0))
+        row += 1
+        self.buttons: Dict[str, Any] = {}
+        commands = {"add_files": self.choose_files, "add_folder": self.choose_folder,
+                    "remove": self.remove_selected, "clear_list": self.clear_list}
+        for index, key in enumerate(("add_files", "add_folder", "remove", "clear_list")):
+            made = w.button(bar, texts.BUTTON[key], commands[key])
+            made.pack(side="left", padx=(0 if index == 0 else px(8), 0))
+            w.explain(made, texts.HOVER[key], self.help_line)
+            self.buttons[key] = made
+        self.rename_button = w.button(bar, texts.BUTTON["change_name"], self.change_name)
+        self.rename_button.pack(side="left", padx=(px(8), 0))
+        w.explain(self.rename_button, texts.HOVER["change_name"], self.help_line)
+        if self.drop_enabled:
+            self.drop_hint = w.label(bar, "or drag files and folders onto the list", "soft")
+            self.drop_hint.pack(side="left", padx=(px(14), 0))
+        self.names_button = w.button(bar, texts.BUTTON["make_names_different"], self.make_names_different)
+        w.explain(self.names_button, texts.HOVER["make_names_different"], self.help_line)
 
         # ---- the results folder
         folder = w.Frame(self)
@@ -206,6 +234,10 @@ class SamplesPage(w.Frame):
         self.folder_notes.grid_remove()
         self._notes_shown = False
 
+        if not self.state.results_dir:
+            own = st.own_results_dir()
+            if own:
+                self.set_results_folder(own, suggested=True)
         self.state.subscribe(self._state_changed)
         self.refresh()
         self._recheck_job: Optional[str] = self.after(RECHECK_MS, self._recheck_tick)
@@ -421,7 +453,9 @@ class SamplesPage(w.Frame):
         }
         for key, usable in flags.items():
             self.buttons[key].state(["!disabled"] if usable else ["disabled"])
-        for made in (self.trim_all_button, self.trim_none_button, self.names_button):
+        self.rename_button.state(["!disabled"] if (not locked and len(self.table.selection()) == 1) else ["disabled"])
+        for made in (self.trim_all_button, self.trim_none_button, self.assemble_all_button,
+                     self.assemble_none_button, self.names_button):
             made.state(["!disabled"] if (some and not locked) else ["disabled"])
         for made in (self.folder_entry, self.browse_button):
             made.state(["!disabled"] if not locked else ["disabled"])
@@ -478,6 +512,43 @@ class SamplesPage(w.Frame):
                 sample.trim = bool(checked)
         self._refresh_folder_lines()
         self.state.notify("samples")
+
+    def assemble_all(self, checked: bool) -> None:
+        """Perform assembly, Select all / Deselect all: every row."""
+        if self.state.running:
+            return
+        for sample in self.state.samples:
+            sample.assemble = bool(checked)
+        self.refresh()
+        self.state.notify("samples")
+
+    def _clicked_assemble(self, event: Any) -> Optional[str]:
+        """A click in the Assemble column ticks or unticks that sample."""
+        tree = self.table.tree
+        if self.state.running or tree.identify_region(event.x, event.y) != "cell":
+            return None
+        keys = [str(c) for c in tree["columns"]]
+        column = tree.identify_column(event.x)
+        try:
+            key = keys[int(column.lstrip("#")) - 1]
+        except (ValueError, IndexError):
+            return None
+        if key != "assemble":
+            return None
+        sample = self.state.sample(tree.identify_row(event.y))
+        if sample is None or not sample.ready:
+            return None
+        sample.assemble = not bool(getattr(sample, "assemble", True))
+        self.refresh()
+        self._refresh_folder_lines()
+        self.state.notify("samples")
+        return None
+
+    def change_name(self) -> None:
+        """The Change name button: edit the output name of the one selected sample."""
+        chosen = self.table.selection()
+        if len(chosen) == 1 and not self.state.running:
+            self.table.begin_rename(chosen[0], "sample")
 
     def trim_all(self, checked: bool) -> None:
         """Trim all / Trim none: every row, also those that are left out for now."""

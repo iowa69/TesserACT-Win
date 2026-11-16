@@ -439,7 +439,7 @@ def test_an_untrimmed_sample_with_stand_ins_and_what_the_engine_is_given(tmp_pat
     assert outcome.next_step == "More sequencing of this sample would give a better assembly."
     assert outcome.contigs == 1 and outcome.total_length == 5000
     (call,) = calls(engines)
-    assert call == "asm S 1 -1 %s -2 %s -o assembly -t %d --mode careful --no-scaffold" % (pair[0], pair[1], THREADS)
+    assert call == "asm S 1 -1 %s -2 %s -o assembly -t %d --mode careful --no-scaffold --no-polish" % (pair[0], pair[1], THREADS)
     record = results.read_status(config.results_dir, "S 1")
     assert record.settings_text == "not trimmed; mode Careful; no scaffolding"
     assert not os.path.exists(results.trimming_dir(config.results_dir, "S 1"))

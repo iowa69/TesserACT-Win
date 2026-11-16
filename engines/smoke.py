@@ -167,7 +167,7 @@ def cmd_run(args) -> int:
             extra["TESSERACT_P2_DETECT_REPORT"] = "1"
             extra["TESSERACT_P2_DETECT_SKETCH"] = sketch
         rc = run_logged([asm, "-1", os.path.join("trimming", t1), "-2", os.path.join("trimming", t2),
-                         "-o", "assembly", "-t", str(args.threads)],
+                         "-o", "assembly", "-t", str(args.threads), "--no-polish"],
                         work, clean_env(extra), os.path.join(work, "assembly.log"))
         record["assembly"] = {"exit": rc, "seconds": round(time.monotonic() - started, 1), "files": {}}
         print("assembly exit %d (%.1f s)" % (rc, record["assembly"]["seconds"]))

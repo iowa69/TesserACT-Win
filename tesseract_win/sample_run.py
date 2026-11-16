@@ -274,6 +274,12 @@ class _SampleRun:
         read1, read2 = self._join_lanes(work)                     # step 1
         if sample.trim:                                           # step 2
             read1, read2 = self._trim(work, read1, read2)
+        if not getattr(sample, "assemble", True):                 # trimming was all that was asked for
+            if not sample.trim:
+                raise _Failure(Explained("Nothing was ticked for this sample: neither trimming nor assembly.",
+                                         "Tick Trim, Assemble or both on the Samples page.", "nothing_to_do"))
+            self._check_stop()
+            return self._finish_trimmed_only(work)
         shown1, shown2 = self._shown(work, read1), self._shown(work, read2)
         check = self._check_reads(read1, read2, shown1, shown2, asm_dir)      # step 3
         result_args = self._assemble(work, asm_dir, shown1, shown2, check)    # steps 4 and 5
@@ -585,6 +591,32 @@ class _SampleRun:
                                  config.trim, config.assembly, bool(sample.trim)),
                              settings_text=settings_text(config, bool(sample.trim)),
                              trimmed=bool(sample.trim))
+        return outcome
+
+    def _finish_trimmed_only(self, work: str) -> SampleOutcome:
+        """Assembly not ticked: keep the trimmed reads and their report, and nothing else."""
+        sample, config, name, rd = self.sample, self.config, self.name, self.results_dir
+        self._status(RunStatus.SUMMARISING)
+        self._stage(Stage.SUMMARISE, "Saving the trimmed reads")
+        new = os.path.join(work, results.TRIMMING)
+        final = results.trimming_dir(rd, name)
+        if not os.path.isdir(new):
+            raise FileNotFoundError(2, "the attempt folder has vanished", new)
+        fsutil.remove_tree(final)
+        fsutil.move_dir(new, final)
+        fsutil.remove_tree(work)
+        report = os.path.join(final, "trimming_report.html")
+        outcome = SampleOutcome(
+            name=name, status=RunStatus.DONE, trimmed=True,
+            note="Trimmed only: Assemble was not ticked for this sample.",
+            folder=results.sample_dir(rd, name),
+            report_html=report if os.path.isfile(report) else "",
+            log=os.path.join(final, "trimming.log"),
+            seconds=_monotonic() - self.began, finished_at=fsutil.now_iso())
+        results.write_status(rd, outcome, reads=results.reads_of(sample),
+                             settings_fingerprint=settings_map.settings_fingerprint(
+                                 config.trim, config.assembly, True),
+                             settings_text=settings_text(config, True), trimmed=True)
         return outcome
 
     # ------------------------------------------------------------------ endings that are not "done"

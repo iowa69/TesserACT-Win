@@ -125,8 +125,11 @@ BUTTON: Dict[str, str] = {
     "add_folder": "Add folder...",
     "remove": "Remove",
     "clear_list": "Clear list",
-    "trim_all": "Trim all",
-    "trim_none": "Trim none",
+    "trim_all": "Select all",
+    "trim_none": "Deselect all",
+    "assemble_all": "Select all",
+    "assemble_none": "Deselect all",
+    "change_name": "Change name...",
     "browse": "Browse...",
     "try_example": "Try the example",
     "make_names_different": "Make the names different (add the folder name)",
@@ -173,7 +176,7 @@ BUTTON: Dict[str, str] = {
 
 #: Samples page: column key -> heading. ``trim`` is the tick column.
 SAMPLES_COLUMNS: Dict[str, str] = {
-    "trim": "Trim", "sample": "Sample", "read1": "Read 1", "read2": "Read 2",
+    "trim": "Trim", "assemble": "Assemble", "sample": "Output name", "read1": "Read 1", "read2": "Read 2",
     "size": "Size", "status": "Status",
 }
 #: Run page: column key -> heading.
@@ -206,7 +209,8 @@ def more_lanes(extra: int) -> str:
 RESULTS_FOLDER_LABEL = "Results folder"
 RESULTS_FOLDER_NOTE = "Each sample gets its own folder here."
 RESULTS_FOLDER_SUGGESTED = "Suggested. Change it if you like."
-TRIMMING_LABEL = "Trimming:"
+TRIMMING_LABEL = "Perform trimming:"
+ASSEMBLING_LABEL = "Perform assembly:"
 
 # --------------------------------------------------------------------------- trimming options
 # Keys are the field names of model.TrimSettings.
@@ -391,8 +395,12 @@ HOVER: Dict[str, str] = {
     "trim_column": "Ticked: the reads are cleaned before assembly. Leave it ticked unless the "
                    "reads were already trimmed elsewhere; trimming twice does no harm.",
     "trim_all": "Ticks Trim for every sample.",
+    "assemble_all": "Ticks Assemble for every sample.",
+    "assemble_none": "Unticks Assemble for every sample: the reads are then trimmed only.",
+    "assemble_column": "Ticked: the sample is assembled. Unticked: its reads are only trimmed.",
+    "change_name": "Gives the selected sample another output name, for example a short experiment name instead of a barcode.",
     "trim_none": "Unticks Trim for every sample. Use it when all the reads were trimmed already.",
-    "sample_column": "The name used for this sample's folder and files. Double-click to change it.",
+    "sample_column": "The name of this sample's folder and FASTA file, taken from the read files. Double-click it, or press Change name, to give another.",
     "read1_column": "The first read file of the sample. Rest the mouse on a name to see where "
                     "the file is.",
     "read2_column": "The second read file of the sample. Rest the mouse on a name to see where "

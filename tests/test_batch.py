@@ -895,7 +895,7 @@ def test_a_summary_that_cannot_be_written_is_told_at_the_end_and_fails_nothing(t
     config = config_for(tmp_path / "r", samples)
     _runner, events = run_batch(config, engines)
     assert events[-1].reason is EndReason.COMPLETED
-    (notice,) = [e for e in events if isinstance(e, Notice)]
+    (notice,) = [e for e in events if isinstance(e, Notice) and e.kind not in ("battery", "memory")]
     assert notice.text.startswith("run_summary.tsv could not be updated because it is open in another program.")
 
 

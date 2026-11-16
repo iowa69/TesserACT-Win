@@ -538,9 +538,28 @@ def inspect_folder(asked: str, samples: Sequence[Sample], trim: TrimSettings,
     return facts
 
 
+#: Shown for a row with neither box ticked.
+NOTHING_TICKED = "Left out: nothing is ticked. Tick Trim, Assemble or both for this sample."
+
+
+def own_results_dir() -> str:
+    """The "assemblies" folder inside the program's own unzipped folder, if it can be written
+    (the frozen program only: a source checkout keeps its results beside the reads)."""
+    if not appdirs.is_frozen():
+        return ""
+    try:
+        home = appdirs.app_dir()
+        return os.path.join(home, "assemblies") if fsutil.is_writable_dir(home) else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def suggest_results_dir(samples: Sequence[Sample]) -> str:
     """Audit 4.1: ``TesserACT_results`` beside the reads, if that place can be written and is
     not synced to a cloud; otherwise "". It tests the folder, so call it from a worker thread."""
+    own = own_results_dir()
+    if own:
+        return own
     folders: List[str] = []
     for sample in samples:
         for pair in sample.lanes:
@@ -658,6 +677,8 @@ class AppState:
         """State and note of a row as shown: its own, or Left out because of what is
         already in the results folder (decision D3, audit 3.7)."""
         if sample.ready:
+            if not sample.trim and not getattr(sample, "assemble", True):
+                return SampleState.LEFT_OUT, NOTHING_TICKED
             reason = self._folder_reason(sample)
             if reason:
                 return SampleState.LEFT_OUT, reason
@@ -852,6 +873,7 @@ def build_config(state: AppState, existing: Existing = Existing.SKIP) -> RunConf
     for sample in state.ready():
         state_now, note = state.view(sample)
         samples.append(Sample(name=sample.name, lanes=[tuple(pair) for pair in sample.lanes], trim=sample.trim,
+                              assemble=bool(getattr(sample, "assemble", True)),
                               size_bytes=sample.size_bytes, state=state_now, note=note))
     return RunConfig(results_dir=state.results_dir, samples=samples, trim=dataclasses.replace(state.trim),
                      assembly=dataclasses.replace(state.assembly), existing=existing)
