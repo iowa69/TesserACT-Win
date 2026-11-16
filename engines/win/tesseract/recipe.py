@@ -32,6 +32,7 @@ import importlib.util
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -124,8 +125,11 @@ def transform(tree: Path) -> dict:
                 raise buildlib.BuildError("LLP64 rewrite: %s: %s" % (path.relative_to(tree).as_posix(), exc))
             if new == text:
                 continue
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(new)
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(new)
+            except OSError as exc:
+                raise buildlib.BuildError("LLP64 rewrite: cannot write %s: %s" % (path.relative_to(tree).as_posix(), exc))
             totals["files"] += 1
             for key, n in zip(("type", "func", "literal", "format"), counts):
                 totals[key] += n
@@ -138,18 +142,58 @@ def transform(tree: Path) -> dict:
     return {"llp64": totals, "rules": found["rules"], "guards": found["guards"]}
 
 
+def _related(a: Path, b: Path) -> bool:
+    """True when the two folders are the same or one lies inside the other."""
+    return a == b or a in b.parents or b in a.parents
+
+
+def _make_writable(tree: Path) -> None:
+    """Give the owner write access to every folder and file under ``tree`` (links are left alone).
+
+    A pristine upstream tree may be kept read-only. Its copy carries the same permissions, and
+    then it could be neither transformed nor, on the next build, deleted.
+    """
+    def allow(path: str) -> None:
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                return
+            wanted = mode | (stat.S_IRWXU if stat.S_ISDIR(mode) else stat.S_IRUSR | stat.S_IWUSR)
+            if wanted != mode:
+                os.chmod(path, wanted)
+        except OSError:
+            pass                    # whoever needs the file reports it
+
+    allow(str(tree))
+    for root, dirs, files in os.walk(str(tree)):
+        for name in dirs + files:           # the folders before os.walk goes into them
+            allow(os.path.join(root, name))
+
+
 def stage(upstream: Path, stage: Path, target: str) -> dict:
     """Make ``stage`` a fresh copy of ``upstream`` and apply every scripted transformation.
 
     The staged tree is the same for both targets. Returns the counts of what was rewritten.
     Fails loudly (``buildlib.BuildError``) when upstream no longer matches what a rule expects.
+    ``stage`` is deleted first, so it is refused when that would touch the upstream source or
+    this folder.
     """
     if target not in buildlib.TARGETS:
         raise buildlib.BuildError("unknown target %r (linux or windows)" % target)
     upstream, stage = Path(upstream), Path(stage)
     if not (upstream / "src" / "main.cpp").is_file():
         raise buildlib.BuildError("%s does not hold the TesserACT source (no src/main.cpp)" % upstream)
-    buildlib.stage_tree(upstream, stage)
+    for what, kept in (("the upstream source", upstream.resolve()), ("the recipe folder", HERE)):
+        if _related(stage.resolve(), kept):
+            raise buildlib.BuildError("refusing to stage into %s: it is, holds or lies inside %s (%s), and "
+                                      "staging starts by deleting the folder it is given" % (stage, what, kept))
+    try:
+        if stage.is_dir() and not stage.is_symlink():
+            _make_writable(stage)                   # a stale copy of a read-only upstream
+        buildlib.stage_tree(upstream, stage)
+    except OSError as exc:
+        raise buildlib.BuildError("cannot stage %s into %s: %s" % (upstream, stage, exc))
+    _make_writable(stage)
     version = upstream_version(stage)
     counts = transform(stage)
     expected = LLP64_EXPECTED.get(version)
@@ -390,6 +434,17 @@ def new_libc_imports(program: Path, nm: str = "nm") -> Optional[List[str]]:
     return sorted(found - known)
 
 
+def _install(built: Path, destination: Path) -> None:
+    """Put a finished program in place in one step: the old one, or the complete new one."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(destination.name + ".new")
+    try:
+        shutil.copy2(built, partial)
+        os.replace(partial, destination)
+    except OSError as exc:
+        raise buildlib.BuildError("cannot put %s in place: %s" % (destination, exc))
+
+
 def build(tc: buildlib.Toolchain, upstream: Path, stage: Path, out_dir: Path, jobs: int) -> dict:
     """Stage, compile and link ``out_dir/tesseract-asm`` (``.exe`` for Windows).
 
@@ -399,6 +454,11 @@ def build(tc: buildlib.Toolchain, upstream: Path, stage: Path, out_dir: Path, jo
     upstream, stage, out_dir = Path(upstream), Path(stage), Path(out_dir)
     log = LOG_DIR / ("build-%s.log" % tc.target)
     _reset_log(log)
+    # Objects of an earlier build must not outlive the tree they were compiled from:
+    # build_tests() links whatever it finds there.
+    objdir = object_dir(stage)
+    if objdir.exists():
+        shutil.rmtree(objdir)
     counts = _stage(upstream, stage, tc.target)
     version = counts["version"]
     if version != versions.TESSERACT_VERSION:
@@ -409,8 +469,12 @@ def build(tc: buildlib.Toolchain, upstream: Path, stage: Path, out_dir: Path, jo
     ldflags = ldflags_for(tc)
     libs = ["-lz"]
 
+    # Linked beside the objects. out_dir and the staged tree get the programs at the very end, when
+    # every check below has passed: a build that fails or is interrupted leaves the earlier program
+    # where it was, never a new one that was not checked.
+    bindir = objdir / "bin"
     resource = _resource_object(tc, stage, BINARY, "TesserACT assembler", version, log)
-    program = out_dir / (BINARY + tc.exe)
+    program = bindir / (BINARY + tc.exe)
     buildlib.link(tc, objects["main"] + objects["library"] + objects["compat"] + resource,
                   program, ldflags, libs, log=log)
     facts = {
@@ -426,17 +490,21 @@ def build(tc: buildlib.Toolchain, upstream: Path, stage: Path, out_dir: Path, jo
         facts.update(_check_windows_program(tc, program))
     elif os.name != "nt":
         facts["new_libc_imports"] = new_libc_imports(program)      # informative; see libc_imports.txt
-    shutil.copy2(program, stage / program.name)
 
     # The model builder: the upstream end-to-end suite builds a model with it. Never shipped.
     model_resource = _resource_object(tc, stage, MODEL_BINARY, "TesserACT model builder", version, log)
+    model = bindir / (MODEL_BINARY + tc.exe)
     buildlib.link(tc, objects["model_main"] + objects["library"] + objects["compat"] + model_resource,
-                  stage / (MODEL_BINARY + tc.exe), ldflags, libs, log=log)
+                  model, ldflags, libs, log=log)
 
     warnings = _warnings(log)
     facts["warnings"] = {"own": len(warnings["own"]), "upstream": len(warnings["upstream"])}
     if warnings["own"]:
         raise buildlib.BuildError("the compatibility layer compiles with warnings:\n" + "\n".join(warnings["own"][:20]))
+
+    _install(model, stage / model.name)
+    _install(program, stage / program.name)
+    _install(program, out_dir / program.name)
     return facts
 
 

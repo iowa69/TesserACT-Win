@@ -61,6 +61,11 @@ GUARDS = [
      "the only pipe is the mapper of --map-polish; ts_compat.h makes it fail with a note about --map-polish"),
     ("G8", ENGINE, "freopen(", 0,
      "ts_compat.h remaps freopen for the test programs only; an engine that calls it needs the body in ts_compat.cpp"),
+    ("G9", ("src/util.cpp",), "MemoryBytes(", 3,
+     "util.cpp must only DEFINE the three memory queries: a call from inside util.cpp would reach the renamed "
+     "POSIX copies, which return 0 on Windows and switch the --max-memory guard off without a word"),
+    ("G10", ENGINE, "rename(", 0,
+     "rename() onto an existing file fails on Windows; the engine has no such call outside the developer fork batch"),
 ]
 
 
@@ -76,9 +81,11 @@ def _write(path, text):
 
 def _files(root, patterns):
     keep, drop = set(), set()
+    # Only the pattern is a pattern: a "[" in the path of the tree itself must not start a character set.
+    base = glob.escape(root)
     for pattern in patterns:
         target = drop if pattern.startswith("!") else keep
-        target.update(glob.glob(os.path.join(root, pattern.lstrip("!"))))
+        target.update(glob.glob(os.path.join(base, pattern.lstrip("!"))))
     return sorted(keep - drop)
 
 

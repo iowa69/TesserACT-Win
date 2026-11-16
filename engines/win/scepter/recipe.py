@@ -42,7 +42,8 @@ if str(buildlib.REPO) not in sys.path:
 from tesseract_win import branding, versions  # noqa: E402
 
 __all__ = ["NAME", "BINARY", "stage", "build", "transform", "manifest_text", "resource_text",
-           "pe_resources", "windows_identity", "windows_resources", "PORT_DIR", "PORT_SOURCES", "LOG_DIR"]
+           "pe_resources", "windows_identity", "windows_resources", "PORT_DIR", "PORT_SOURCES", "LOG_DIR",
+           "SUPPORTED_OS"]
 
 NAME = "scepter"
 BINARY = "scepter"

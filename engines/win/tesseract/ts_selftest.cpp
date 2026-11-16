@@ -14,11 +14,15 @@
 // ::environ, localtime_r, realpath, ts::util::*). On Linux they therefore test glibc and the
 // upstream code, on Windows the compatibility layer, and the two outputs can be compared line by
 // line. Lines that differ by design: platform, sizeof_long (8 on Linux, 4 on Windows).
+// thread_stack_4m is "skipped" on a Linux system whose threads get less than 6 MiB of stack.
 #include "ts_selftest.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
+#ifdef __linux__
+#  include <pthread.h>
+#endif
 
 #include <chrono>
 #include <climits>
@@ -212,6 +216,67 @@ void probeProcess() {
     probeBool("localtime_r", localtime_r(&tt, &tmv) != nullptr && tmv.tm_year >= 70 && tmv.tm_year <= 71);
 }
 
+// ---- the stack of a worker thread ------------------------------------------------------------------
+// The gap filler (Walker::walk, src/gapfill.cpp) recurses once per base, about 4,100 levels deep, on
+// std::thread workers. Linux gives a thread 8 MiB. The Windows build asks the linker for 16 MiB
+// (-Wl,--stack,16777216), which is also what a new thread gets; without it a thread has 2 MiB and
+// such a walk ends the program with exception 0xC00000FD and no message. One level below uses a
+// little more than 1 KiB, so 4,096 levels need well over 4 MiB. Called through a volatile pointer
+// so that the compiler can neither inline the levels nor turn them into a loop.
+unsigned long long burnStack(int depth, unsigned long long seed);
+unsigned long long (*volatile gBurnStack)(int, unsigned long long) = burnStack;
+
+unsigned long long burnStack(int depth, unsigned long long seed) {
+    volatile unsigned char pad[1024];
+    for (size_t i = 0; i < sizeof pad; i += 64) pad[i] = static_cast<unsigned char>(seed >> (i & 31));
+    const unsigned long long below =
+        depth > 1 ? gBurnStack(depth - 1, seed * 6364136223846793005ULL + 1442695040888963407ULL) : seed;
+    return below + pad[((seed >> 33) % (sizeof pad / 64)) * 64];      // read after the call: no tail call
+}
+
+// How much stack the calling thread has; 0 when that cannot be told.
+size_t threadStackBytes() {
+#ifdef __linux__
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;
+    void* base = nullptr;
+    size_t size = 0;
+    if (pthread_attr_getstack(&attr, &base, &size) != 0) size = 0;
+    pthread_attr_destroy(&attr);
+    return size;
+#else
+    return 0;
+#endif
+}
+
+void probeThreadStack() {
+    const int levels = 4096;
+    bool walked = false;
+    unsigned long long sum = 0;
+    size_t have = 0;
+    std::fprintf(stderr, "ts_compat selftest: walking %d levels (over 4 MiB) of stack on a worker thread; if the "
+                         "program ends here, threads do not get the stack the gap filler needs\n", levels);
+    std::fflush(stdout);                         // what was printed so far survives a stack overflow
+    std::fflush(stderr);
+    std::thread worker([&]() {
+        have = threadStackBytes();
+#ifdef _WIN32
+        const bool roomy = true;                 // the very thing to prove: the 16 MiB reach every thread
+#else
+        const bool roomy = have >= (static_cast<size_t>(6) << 20);
+#endif
+        if (!roomy) return;
+        sum = gBurnStack(levels, 0x9E3779B97F4A7C15ULL);
+        walked = true;
+    });
+    worker.join();
+    if (!walked) {
+        std::fprintf(stderr, "ts_compat selftest: thread stack walk skipped, a thread has %llu bytes of stack here\n",
+                     static_cast<unsigned long long>(have));
+    }
+    probe("thread_stack_4m", walked ? "1" : "skipped", walked ? sum != 0 : true);
+}
+
 void probeFiles(const std::string& work) {
     // ---- the same-file test of main.cpp and seqio.cpp
     const std::string a = work + "/a.txt", b = work + "/b.txt";
@@ -330,6 +395,7 @@ int selfTest() {
     probeFormats();
     probeMemory();
     probeProcess();
+    probeThreadStack();
     const std::string base = workBase();
     const std::string work = base + "/ts-compat-selftest-" + num(static_cast<long long>(getpid())) + "-" +
                              num(static_cast<long long>(std::time(nullptr)));

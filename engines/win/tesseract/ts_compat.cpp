@@ -503,8 +503,9 @@ struct SelfTestHook {
     SelfTestHook() {
         const char* wanted = std::getenv("TS_COMPAT_SELFTEST");
         if (!wanted || std::strcmp(wanted, "1") != 0) return;
-        const int status = ts_compat::selfTest();
-        std::fflush(stdout);
+        int status = ts_compat::selfTest();
+        // A report that could not be written is not a pass (a closed or full stdout).
+        if (std::fflush(stdout) != 0 || std::ferror(stdout)) status = 1;
         std::fflush(stderr);
         std::_Exit(status);
     }
