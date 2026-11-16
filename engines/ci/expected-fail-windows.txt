@@ -17,3 +17,4 @@
 #
 # Empty on purpose: the suites have not run on Windows yet. Fill it in from the first run
 # of the "Windows build, proof and package" job, one understood reason per line.
+tesseract-e2e|install.sh --prefix  # checks the Unix install script (bin/, libexec/, the bash wrapper); nothing is installed that way on Windows
