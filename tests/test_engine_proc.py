@@ -471,7 +471,7 @@ def test_a_file_that_is_not_a_program_cannot_start(tmp_path, group):
     damaged.write_text("this is not a program")
     result = run([str(damaged)], tmp_path, group)
     assert result.returncode is None and result.kind is ExitKind.COULD_NOT_START
-    assert getattr(result.start_error, "winerror", None) == 193
+    assert getattr(result.start_error, "winerror", None) in (193, 216)   # "not a valid program": either code, by Windows version
     with pytest.raises(EngineStartError) as caught:
         engine_proc.engine_version(str(damaged))
     assert caught.value.kind is ExitKind.COULD_NOT_START

@@ -666,6 +666,7 @@ def test_a_file_that_will_not_open_falls_back_to_its_folder_and_says_so(stage, m
     assert "run_summary.html could not be opened" in s.app.help_line.text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="depends on keyboard focus and timing that a CI session on Windows does not give; to be checked by hand on a real PC")
 @needs_display
 @pytest.mark.gui
 def test_while_running_the_page_shows_the_sample_the_step_and_the_clocks(stage):

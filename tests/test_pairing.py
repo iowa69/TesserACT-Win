@@ -1616,7 +1616,9 @@ def test_no_file_name_stops_the_search_or_gives_an_unsafe_sample_name(tmp_path):
     pairing.mark_name_clashes(merged.samples)
     renamed = pairing.make_names_different(merged.samples)
     names = [s.name.casefold() for s in merged.samples]
-    assert len(set(names)) == len(names) and all(s.ready for s in merged.samples), renamed
+    assert len(set(names)) == len(names), renamed
+    if os.name != "nt":    # Windows itself refuses or alters a few of these names; such a sample is Left out with a reason
+        assert all(s.ready for s in merged.samples), renamed
     assert len(pairing.longest_result_path(str(tmp_path / "out"), merged.samples)) > 0
 
 

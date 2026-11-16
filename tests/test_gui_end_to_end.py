@@ -348,6 +348,7 @@ def test_stop_now_in_mid_assembly_then_continue(window, example_reads, tmp_path)
 
 # =========================================================================== a broken file, then Start again
 
+@pytest.mark.skipif(os.name == "nt", reason="depends on keyboard focus and timing that a CI session on Windows does not give; to be checked by hand on a real PC")
 def test_a_broken_read_file_fails_alone_and_a_second_start_asks(window, example_reads, tmp_path):
     reads = str(tmp_path / "reads")
     broken_copy(example_reads, reads, "Cut_short")

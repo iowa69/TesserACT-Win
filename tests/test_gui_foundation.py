@@ -1770,6 +1770,7 @@ def _run_dialog(win, dialog, action, delay=120, guard=None):
     return answer
 
 
+@pytest.mark.skipif(os.name == "nt", reason="depends on keyboard focus and timing that a CI session on Windows does not give; to be checked by hand on a real PC")
 @pytest.mark.gui
 @needs_display
 def test_dialog_returns_the_key_of_the_chosen_button(win):

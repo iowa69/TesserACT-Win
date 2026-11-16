@@ -1030,7 +1030,7 @@ def test_scepter_with_awkward_paths_and_sample_names(reads, tmp_path):
         assert sorted(p.name for p in folder.iterdir()) == sorted(
             [files.read1, files.read2, files.json_report, files.html_report]), name
         config, report = _config(folder / files.json_report)
-        assert config["report_title"] == name and config["in1"] == first and config["out1"] == files.read1
+        assert config["report_title"] == name and config["in1"].replace("\\", "/") == first.replace("\\", "/") and config["out1"] == files.read1
         assert report["summary"]["after_filtering"]["total_reads"] > 0
         assert _records(folder / files.read1).count(b"\n") == _records(folder / files.read2).count(b"\n") > 0
 
